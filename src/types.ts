@@ -1,0 +1,36 @@
+export type RootStackParamList = {
+  Welcome: undefined;
+  Login: undefined;
+  Main: undefined;
+  Menu: undefined;
+  About: undefined;
+  Team: undefined;
+  ApplicationOne: undefined;
+  ApplicationTwo: undefined;
+  Review: undefined;
+  Success: undefined;
+  Payments: undefined;
+  Services: undefined;
+  Branches: undefined;
+  Gallery: undefined;
+  Calendar: undefined;
+  Learning: undefined;
+  DailyActivity: undefined;
+  Forms: undefined;
+  Feedback: undefined;
+  Newsletter: undefined;
+  Notifications: undefined;
+  StudentReport: undefined;
+  Store: undefined;
+  Cart: undefined;
+  BrandStory: undefined;
+  DeliveryPlan: undefined;
+};
+export type User = {
+  id: string;
+  name: string;
+  email: string;
+  phone?: string;
+  tenantId?: string;
+  child?: string;
+};

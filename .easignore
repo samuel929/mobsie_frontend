@@ -1,0 +1,8 @@
+node_modules/
+.expo/
+outputs/
+work/
+docs/source-data/
+*.log
+.DS_Store
+.env

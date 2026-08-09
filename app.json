@@ -1,0 +1,52 @@
+{
+  "expo": {
+    "name": "Mobsie Connect",
+    "slug": "mobsie-connect",
+    "version": "1.0.0",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "orientation": "portrait",
+    "android": {
+      "softwareKeyboardLayoutMode": "resize",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/clean/favicon.png",
+        "backgroundColor": "#F8F4EC"
+      },
+      "package": "co.mobsie.connect"
+    },
+    "icon": "./assets/clean/favicon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/clean/logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#F8F4EC"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "icon": "./assets/clean/favicon.png",
+      "bundleIdentifier": "co.mobsie.connect"
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-font",
+      "expo-updates",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/clean/favicon.png",
+          "color": "#008D85"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "fd85a855-ce49-4734-b3f3-25e40271c25c"
+      }
+    },
+    "owner": "samuel44"
+  }
+}
