@@ -2,9 +2,13 @@
   "expo": {
     "name": "Mobsie Connect",
     "slug": "mobsie-connect",
+    "scheme": "mobsieconnect",
     "version": "1.0.0",
     "runtimeVersion": {
       "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/fd85a855-ce49-4734-b3f3-25e40271c25c"
     },
     "orientation": "portrait",
     "android": {
@@ -17,16 +21,13 @@
     },
     "icon": "./assets/clean/favicon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/clean/logo.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#F8F4EC"
-    },
     "ios": {
       "supportsTablet": true,
       "icon": "./assets/clean/favicon.png",
-      "bundleIdentifier": "co.mobsie.connect"
+      "bundleIdentifier": "co.mobsie.connect",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "web": {
       "bundler": "metro"
@@ -37,8 +38,26 @@
       [
         "expo-notifications",
         {
-          "icon": "./assets/clean/favicon.png",
+          "icon": "./assets/clean/notification-icon.png",
           "color": "#008D85"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Mobsie Connect to access photos for application document uploads.",
+          "cameraPermission": "Allow Mobsie Connect to take photos for application document uploads."
+        }
+      ],
+      "expo-asset",
+      "expo-sharing",
+      "expo-status-bar",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/clean/logo.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#F8F4EC"
         }
       ]
     ],

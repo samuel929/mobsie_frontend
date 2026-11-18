@@ -7,7 +7,7 @@ import { colors } from '../theme';
 
 export function AppHeader({
   title,
-  notification = true,
+  notification = false,
 }: {
   title?: string;
   notification?: boolean;

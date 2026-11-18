@@ -18,6 +18,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useAuth } from '../../auth/AuthContext';
 import { useSchoolData } from '../../data/SchoolContext';
+import { sentenceCase } from '../../utils/text';
 import { apiData } from '../../services/api/client';
 import { colors, radius, shadow } from '../../theme';
 
@@ -26,9 +27,8 @@ type DeregistrationReason =
 
 type DeregistrationResult = {
   requestId: string;
-  removedStudent: boolean;
-  removedParent: boolean;
   studentName: string;
+  removalDate: string;
 };
 
 const reasons: Array<{ label: string; value: DeregistrationReason }> = [
@@ -138,11 +138,21 @@ function DateModal({
   onSelect: (date: Date) => void;
 }) {
   const [draft, setDraft] = useState(value);
+  const [month, setMonth] = useState(new Date(value.getFullYear(), value.getMonth(), 1));
   const minimum = minimumNoticeDate();
-  const move = (days: number) => {
-    const candidate = addDays(draft, days);
-    setDraft(candidate < minimum ? minimum : candidate);
-  };
+  const monthStart = new Date(month.getFullYear(), month.getMonth(), 1);
+  const startOffset = monthStart.getDay();
+  const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+  const cells = Array.from(
+    { length: Math.ceil((startOffset + daysInMonth) / 7) * 7 },
+    (_, index) => {
+      const day = index - startOffset + 1;
+      return day < 1 || day > daysInMonth
+        ? null
+        : new Date(month.getFullYear(), month.getMonth(), day);
+    },
+  );
+  const sameDay = (left: Date, right: Date) => isoDate(left) === isoDate(right);
 
   return (
     <Modal transparent visible={visible} animationType="fade" onRequestClose={onClose}>
@@ -152,16 +162,56 @@ function DateModal({
             <Ionicons name="calendar-outline" size={28} color={colors.orange} />
           </View>
           <Text style={styles.modalTitle}>Last Day of Attendance</Text>
-          <Text style={styles.dateHint}>Select a date at least 30 days from today.</Text>
-          <Text style={styles.dateValue}>{displayDate(draft)}</Text>
-          <View style={styles.dateControls}>
-            {[-7, -1, 1, 7].map((days) => (
-              <Pressable key={days} style={styles.dateControl} onPress={() => move(days)}>
-                <Text style={styles.dateControlText}>
-                  {days > 0 ? `+${days}` : days} day{Math.abs(days) === 1 ? '' : 's'}
-                </Text>
-              </Pressable>
+          <Text style={styles.dateHint}>Select the learner's final day of attendance.</Text>
+          <View style={styles.monthControlRow}>
+            <Pressable
+              onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))}
+            >
+              <Ionicons name="chevron-back" size={24} color={colors.green} />
+            </Pressable>
+            <Text style={styles.monthLabel}>
+              {month.toLocaleDateString('en-ZA', { month: 'long', year: 'numeric' })}
+            </Text>
+            <Pressable
+              onPress={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))}
+            >
+              <Ionicons name="chevron-forward" size={24} color={colors.green} />
+            </Pressable>
+          </View>
+          <View style={styles.calendarWeekdays}>
+            {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day, index) => (
+              <Text key={`${day}-${index}`} style={styles.calendarWeekday}>
+                {day}
+              </Text>
             ))}
+          </View>
+          <View style={styles.calendarGrid}>
+            {cells.map((date, index) => {
+              const disabled = !date || date < minimum;
+              const selected = Boolean(date && sameDay(date, draft));
+              return (
+                <Pressable
+                  key={`${index}-${date?.getDate() ?? 'empty'}`}
+                  disabled={disabled}
+                  style={[
+                    styles.calendarDay,
+                    selected && styles.calendarDaySelected,
+                    disabled && styles.calendarDayDisabled,
+                  ]}
+                  onPress={() => date && setDraft(date)}
+                >
+                  <Text
+                    style={[
+                      styles.calendarDayText,
+                      selected && styles.calendarDayTextSelected,
+                      disabled && styles.calendarDayTextDisabled,
+                    ]}
+                  >
+                    {date?.getDate() ?? ''}
+                  </Text>
+                </Pressable>
+              );
+            })}
           </View>
           <View style={styles.dateActions}>
             <Pressable style={[styles.modalButton, styles.modalButtonOutline]} onPress={onClose}>
@@ -239,13 +289,12 @@ export function DeregistrationScreen() {
 
   const learner = students.find((student) => student.id === studentId);
   const reasonLabel = reasons.find((item) => item.value === reason)?.label;
-
   const studentOptions = useMemo(
     () =>
       students.map((student) => ({
         value: student.id,
         label: student.name,
-        subtitle: `${student.grade} · ${student.branchName}`,
+        subtitle: `${sentenceCase(student.grade)} · ${student.branchName}`,
       })),
     [students],
   );
@@ -257,7 +306,9 @@ export function DeregistrationScreen() {
     }
     setSubmitting(true);
     try {
-      const response = await apiData<DeregistrationResult>('/mobile/deregistration', {
+      // Use the plural resource endpoint.  The dashboard keeps the legacy
+      // singular endpoint as a compatibility alias for older builds.
+      const response = await apiData<DeregistrationResult>('/mobile/deregistrations', {
         method: 'POST',
         token,
         body: JSON.stringify({
@@ -269,7 +320,7 @@ export function DeregistrationScreen() {
         }),
       });
       setResult(response);
-      if (!response.removedParent) await refresh();
+      await refresh();
     } catch (error) {
       Alert.alert('Unable to deregister learner', (error as Error).message);
     } finally {
@@ -296,13 +347,12 @@ export function DeregistrationScreen() {
     }
 
     Alert.alert(
-      'Remove learner permanently?',
-      `${learner?.name ?? 'This learner'} will be removed from the school database. If this is your only learner, your parent account will also be removed. This cannot be undone.`,
+      'Submit deregistration request?',
+      `${learner?.name ?? 'This learner'} remains enrolled until 31 December ${lastDay.getFullYear()}. Their details will only be removed after the school year ends.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Remove Learner',
-          style: 'destructive',
+          text: 'Submit Request',
           onPress: () => void performDeregistration(),
         },
       ],
@@ -318,21 +368,16 @@ export function DeregistrationScreen() {
           </View>
           <Text style={styles.successTitle}>Request Submitted</Text>
           <Text style={styles.successMessage}>
-            {result.studentName} has been deregistered and removed from the learner database.
-            {result.removedParent
-              ? ' Your parent account was also removed because no other learners were linked to it.'
-              : ' Your parent account remains active for your other learner profiles.'}
+            {result.studentName}'s request has been recorded. The learner remains available until{' '}
+            {displayDate(new Date(`${result.removalDate}T00:00:00`))}, when the school year ends.
+            Your account remains active until then.
           </Text>
         </View>
         <View style={styles.successFooter}>
           <Pressable
             style={styles.submitButton}
             onPress={() => {
-              if (result.removedParent) {
-                void logout();
-              } else {
-                navigation.navigate('MainApp', { screen: 'Tabs', params: { screen: 'Home' } });
-              }
+              navigation.navigate('MainApp', { screen: 'Tabs', params: { screen: 'Home' } });
             }}
           >
             <Text style={styles.submitButtonText}>Back to Home</Text>
@@ -663,15 +708,34 @@ const styles = StyleSheet.create({
     marginTop: 5,
     textAlign: 'center',
   },
-  dateValue: { color: colors.ink, fontFamily: 'Poppins_700Bold', fontSize: 20, marginVertical: 22 },
-  dateControls: { flexDirection: 'row', gap: 7 },
-  dateControl: { backgroundColor: '#F2F5F8', borderRadius: 9, flex: 1, paddingVertical: 10 },
-  dateControlText: {
-    color: '#344256',
-    fontFamily: 'Poppins_500Medium',
-    fontSize: 9,
+  monthControlRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 18,
+    width: '100%',
+  },
+  monthLabel: { color: colors.ink, fontFamily: 'Poppins_700Bold', fontSize: 16 },
+  calendarWeekdays: { flexDirection: 'row', marginTop: 15, width: '100%' },
+  calendarWeekday: {
+    color: '#748398',
+    flex: 1,
+    fontFamily: 'Poppins_600SemiBold',
+    fontSize: 11,
     textAlign: 'center',
   },
+  calendarGrid: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 8, width: '100%' },
+  calendarDay: {
+    alignItems: 'center',
+    aspectRatio: 1,
+    justifyContent: 'center',
+    width: '14.2857%',
+  },
+  calendarDaySelected: { backgroundColor: colors.orange, borderRadius: 20 },
+  calendarDayDisabled: { opacity: 0.3 },
+  calendarDayText: { color: colors.ink, fontFamily: 'Poppins_500Medium', fontSize: 12 },
+  calendarDayTextSelected: { color: '#fff', fontFamily: 'Poppins_700Bold' },
+  calendarDayTextDisabled: { color: '#A5AFBA' },
   dateActions: { flexDirection: 'row', gap: 10, marginTop: 22, width: '100%' },
   modalButton: {
     alignItems: 'center',

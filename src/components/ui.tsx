@@ -81,15 +81,28 @@ export function Header({
   title,
   onMenu,
   onBell = true,
+  fallbackRoute,
 }: {
   title?: string;
   onMenu?: () => void;
   onBell?: boolean;
+  fallbackRoute?: string;
 }) {
-  const navigation = useNavigation();
+  const navigation = useNavigation<any>();
+  const handleLeadingPress = () => {
+    if (onMenu) {
+      onMenu();
+      return;
+    }
+    if (navigation.canGoBack()) {
+      navigation.goBack();
+      return;
+    }
+    if (fallbackRoute) navigation.navigate(fallbackRoute);
+  };
   return (
     <View style={s.header}>
-      <Pressable onPress={onMenu ?? (() => navigation.goBack())} hitSlop={12}>
+      <Pressable onPress={handleLeadingPress} hitSlop={12}>
         <Ionicons name={onMenu ? 'menu' : 'chevron-back'} size={24} color={colors.ink} />
       </Pressable>
       <Text style={s.headerTitle}>{title}</Text>
@@ -107,6 +120,7 @@ export function Button({
   color = colors.orange,
   outline = false,
   icon,
+  disabled = false,
   style
 }: {
   title: string;
@@ -114,17 +128,19 @@ export function Button({
   color?: string;
   outline?: boolean;
   icon?: keyof typeof Ionicons.glyphMap;
+  disabled?: boolean;
   style?: StyleProp<ViewStyle>;
 }) {
   return (
     <Pressable
+      disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
         s.button,
         {
           backgroundColor: outline ? 'transparent' : color,
           borderColor: color,
-          opacity: pressed ? 0.82 : 1,
+          opacity: disabled ? 0.55 : pressed ? 0.82 : 1,
         },
         style
       ]}
@@ -162,6 +178,8 @@ export function Field({
   autoCorrect,
   autoComplete,
   textContentType,
+  rightIcon,
+  onRightIconPress,
 }: {
   label: string;
   placeholder?: string;
@@ -175,28 +193,38 @@ export function Field({
   autoCorrect?: boolean;
   autoComplete?: TextInputProps['autoComplete'];
   textContentType?: TextInputProps['textContentType'];
+  rightIcon?: keyof typeof Ionicons.glyphMap;
+  onRightIconPress?: () => void;
 }) {
   return (
     <View style={s.fieldWrap}>
       <Text style={s.label}>{label}</Text>
-      <TextInput
-        style={[
-          s.input,
-          multiline && { height: 72, textAlignVertical: 'top' },
-          error && s.inputError,
-        ]}
-        placeholder={placeholder}
-        placeholderTextColor="#AAA"
-        value={value}
-        onChangeText={onChangeText}
-        keyboardType={keyboardType}
-        multiline={multiline}
-        secureTextEntry={secureTextEntry}
-        autoCapitalize={autoCapitalize}
-        autoCorrect={autoCorrect}
-        autoComplete={autoComplete}
-        textContentType={textContentType}
-      />
+      <View style={s.inputRow}>
+        <TextInput
+          style={[
+            s.input,
+            rightIcon && { paddingRight: 50 },
+            multiline && { height: 72, textAlignVertical: 'top' },
+            error && s.inputError,
+          ]}
+          placeholder={placeholder}
+          placeholderTextColor="#AAA"
+          value={value}
+          onChangeText={onChangeText}
+          keyboardType={keyboardType}
+          multiline={multiline}
+          secureTextEntry={secureTextEntry}
+          autoCapitalize={autoCapitalize}
+          autoCorrect={autoCorrect}
+          autoComplete={autoComplete}
+          textContentType={textContentType}
+        />
+        {!!rightIcon && (
+          <Pressable accessibilityRole="button" accessibilityLabel="Toggle password visibility" style={s.inputIcon} onPress={onRightIconPress} hitSlop={10}>
+            <Ionicons name={rightIcon} size={22} color={colors.muted} />
+          </Pressable>
+        )}
+      </View>
       {!!error && <Text style={s.fieldError}>{error}</Text>}
     </View>
   );
@@ -284,6 +312,8 @@ const s = StyleSheet.create({
   },
   buttonText: { fontFamily: 'Poppins_700Bold', fontSize: 14, lineHeight: 20 },
   fieldWrap: { marginVertical: 7 },
+  inputRow: { position: 'relative' },
+  inputIcon: { position: 'absolute', right: 16, top: 0, bottom: 0, justifyContent: 'center' },
   label: {
     fontSize: 12,
     fontWeight: '700',

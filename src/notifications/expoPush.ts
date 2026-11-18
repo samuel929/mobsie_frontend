@@ -34,3 +34,4 @@ export async function getExpoPushToken(): Promise<string | null> {
 
   const response = await Notifications.getExpoPushTokenAsync({ projectId });
   return response.data;
+}

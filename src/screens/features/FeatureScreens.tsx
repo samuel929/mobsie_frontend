@@ -3,11 +3,13 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Image,
+  ImageBackground,
+  KeyboardAvoidingView,
   Linking,
   Modal,
   Platform,
@@ -30,11 +32,12 @@ import {
   ConsentFormTemplate,
 } from '../../data/consentForms';
 import { notifications } from '../../data/features';
+import { sentenceCase } from '../../utils/text';
 import { deliveryMilestones } from '../../data/schedule';
 import { colors, radius } from '../../theme';
 import { Product, useSchoolData } from '../../data/SchoolContext';
 import { apiData } from '../../services/api/client';
-import { UNIFORM_BANKING } from '../../data/schoolPackages';
+import { openNotificationDestination } from '../../notifications/navigation';
 
 type IconName = keyof typeof Ionicons.glyphMap;
 
@@ -84,21 +87,15 @@ export function DailyActivityScreen() {
   const scheduledActivities = remoteActivities
     .filter((activity: any) => {
       const repeat = activity.repeat || 'EVERY_DAY';
-      const occursToday =
+      // The API already resolves the timetable to the signed-in parent's
+      // branch and class. Do not apply a second client-side branch/class
+      // comparison here: enrolment stages and dashboard class labels can use
+      // different display text and used to hide valid activities.
+      return (
         repeat === 'EVERY_DAY' ||
         (repeat === 'WEEKDAYS' && !['SATURDAY', 'SUNDAY'].includes(dayName)) ||
-        repeat === dayName;
-      const matchesBranch =
-        !activity.branchId ||
-        activity.branchId === 'ALL' ||
-        activity.branchId === student?.branchId ||
-        activity.branchName === student?.branchName;
-      const matchesClass =
-        !activity.className ||
-        activity.className === 'ALL' ||
-        activity.className === student?.className ||
-        activity.className === student?.grade;
-      return occursToday && matchesBranch && matchesClass;
+        repeat === dayName
+      );
     })
     .map((activity: any) => ({
       ...activity,
@@ -153,7 +150,9 @@ export function DailyActivityScreen() {
       <FeatureHeader title="Daily Activity" />
       <Text style={styles.heading}>{dateLabel}</Text>
       <Text style={styles.subtle}>
-        {student ? `${student.name} · ${student.className || student.grade}` : 'Today’s timetable'}{' '}
+        {student
+          ? `${student.name} · ${sentenceCase(student.className || student.grade)}`
+          : 'Today’s timetable'}{' '}
         · {now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
       </Text>
       {loading && <ActivityIndicator color={colors.green} />}
@@ -176,13 +175,18 @@ export function DailyActivityScreen() {
       <View style={styles.timeline}>
         <View style={styles.timelineRail} />
         {activities.map((activity: any, index: number) => (
-          <View key={activity.id || `${activity.startTime}-${activity.title}`} style={styles.timelineRow}>
+          <View
+            key={activity.id || `${activity.startTime}-${activity.title}`}
+            style={styles.timelineRow}
+          >
             <Text style={styles.time}>{activity.startTime}</Text>
             <View style={[styles.dot, { backgroundColor: activity.color }]} />
             <Card
               style={[
                 styles.activityCard,
-                { backgroundColor: Platform.select({ ios: `${activity.color}20`, android: `${activity.color}0` }) },
+                Platform.OS === 'android'
+                  ? [styles.androidActivityCard, { borderLeftColor: activity.color }]
+                  : { backgroundColor: `${activity.color}14`, borderLeftColor: activity.color },
                 index === currentIndex && styles.currentActivity,
               ]}
             >
@@ -194,7 +198,7 @@ export function DailyActivityScreen() {
                 </Text>
                 {!!activity.detail && <Text style={styles.subtle}>{activity.detail}</Text>}
                 {!!activity.className && activity.className !== 'ALL' && (
-                  <Text style={styles.classLabel}>Class: {activity.className}</Text>
+                  <Text style={styles.classLabel}>Class: {sentenceCase(activity.className)}</Text>
                 )}
               </View>
               {index === currentIndex && <Text style={styles.nowBadge}>NOW</Text>}
@@ -221,13 +225,28 @@ export function DailyActivityScreen() {
 }
 
 export function FormsScreen() {
-  const { forms: apiForms, loading, refresh, students } = useSchoolData();
-  const { token } = useAuth();
+  const { loading, refresh, students, applications, activeChild } = useSchoolData();
+  const { token, user } = useAuth();
+  const [apiForms, setApiForms] = useState<any[]>([]);
   const [completedForms, setCompletedForms] = useState<Record<string, ConsentFormCompletion>>({});
   const [activeForm, setActiveForm] = useState<DisplayForm | null>(null);
-  const storageKey = 'mobsie.completed-consent-forms';
+  const [viewingForm, setViewingForm] = useState<DisplayForm | null>(null);
+  const enrolledStudent = activeChild?.student ?? students.find((student) =>
+    ['ENROLLED', 'ACTIVE'].includes(String(student.enrollmentStatus).toUpperCase()),
+  );
+  const storageKey = `mobsie.completed-consent-forms.${user?.id ?? 'anonymous'}.${enrolledStudent?.id ?? 'none'}`;
   useFocusEffect(
     React.useCallback(() => {
+      if (token && enrolledStudent?.id) {
+        apiData<any[]>(
+          `/mobile/consent-forms?studentId=${encodeURIComponent(enrolledStudent.id)}`,
+          { token, forceRefresh: true, cacheTtlMs: 0 },
+        )
+          .then(setApiForms)
+          .catch(() => setApiForms([]));
+      } else {
+        setApiForms([]);
+      }
       AsyncStorage.getItem(storageKey)
         .then((stored) => {
           const parsed = stored ? JSON.parse(stored) : {};
@@ -241,7 +260,7 @@ export function FormsScreen() {
           );
         })
         .catch(() => setCompletedForms({}));
-    }, []),
+    }, [enrolledStudent?.id, storageKey, token]),
   );
   const items: DisplayForm[] = consentFormTemplates.map((template) => {
     const remote: any = apiForms.find(
@@ -252,7 +271,10 @@ export function FormsScreen() {
     const rawStatus = String(remote?.signatureStatus || remote?.consentStatus || '').toUpperCase();
     const localCompletion = completedForms[template.id];
     const status =
-      remote?.signed === true || rawStatus === 'SIGNED' || Boolean(localCompletion)
+      remote?.signed === true ||
+      remote?.completed === true ||
+      rawStatus === 'SIGNED' ||
+      Boolean(localCompletion)
         ? 'SIGNED'
         : ['OUTSTANDING', 'REQUIRED', 'PENDING_SIGNATURE'].includes(rawStatus)
           ? 'OUTSTANDING'
@@ -265,74 +287,91 @@ export function FormsScreen() {
       completion: localCompletion || null,
       documentUrl:
         remote?.documentUrl || remote?.fileUrl || remote?.secureUrl || remote?.url || null,
-      // This must be Pacta's public/direct recipient link returned by our API,
-      // never its authenticated /api/v1 base URL.
-      signerUrl: remote?.signerUrl || remote?.signingUrl || remote?.directLinkUrl || null,
+      signerUrl: null,
     };
   });
   const available = items.filter((form) => form.status === 'AVAILABLE');
   const outstanding = items.filter((form) => form.status === 'OUTSTANDING');
   const signed = items.filter((form) => form.status === 'SIGNED');
+  const applicationReference = (activeChild?.application ? [activeChild.application] : applications).find((application) =>
+    ['APPROVED', 'ENROLLED'].includes(String(application.status).toUpperCase()),
+  )?.reference;
   return (
     <Screen onRefresh={refresh}>
       <FeatureHeader title="Forms & Consent" />
       {loading && <ActivityIndicator color={colors.green} />}
-      <Card style={styles.progressCard}>
-        <View style={styles.progressRing}>
-          <Ionicons name="documents-outline" size={28} color={colors.green} />
-        </View>
-        <View>
-          <Text style={styles.headingSmall}>{items.length} forms available</Text>
-          <Text style={styles.subtle}>Open and review each school consent form</Text>
-        </View>
-      </Card>
-      {!!available.length && <SectionTitle title="Available Forms" />}
-      {available.map((form) => (
-        <FormCard key={form.id} form={form} onComplete={setActiveForm} />
-      ))}
-      {!!outstanding.length && <SectionTitle title="Outstanding Forms" />}
-      {outstanding.map((form) => (
-        <FormCard key={form.id} form={form} onComplete={setActiveForm} />
-      ))}
-      {!!signed.length && <SectionTitle title="Signed Forms" />}
-      {signed.map((form) => (
-        <FormCard key={form.id} form={form} onComplete={setActiveForm} />
-      ))}
-      <ConsentEditor
-        form={activeForm}
-        onClose={() => setActiveForm(null)}
-        onHostedSign={async (form) => {
-          try {
-            if (form.signerUrl) {
-              await Linking.openURL(form.signerUrl);
-              return;
-            }
-            if (!token) throw new Error('Please sign in again.');
-            const result = await apiData<{ url: string }>(
-              `/mobile/consent-forms/${encodeURIComponent(form.id)}/signing-link`,
-              {
+      {!loading && (!enrolledStudent || !applicationReference) ? (
+        <Card>
+          <Ionicons name="lock-closed-outline" size={28} color={colors.orange} />
+          <Text style={styles.headingSmall}>Available after enrolment</Text>
+          <Text style={styles.subtle}>
+            Consent forms unlock once your child is enrolled and an application reference has been
+            issued.
+          </Text>
+        </Card>
+      ) : (
+        <>
+          <Card style={styles.progressCard}>
+            <View style={styles.progressRing}>
+              <Ionicons name="documents-outline" size={28} color={colors.green} />
+            </View>
+            <View>
+              <Text style={styles.headingSmall}>{items.length} forms available</Text>
+              <Text style={styles.subtle}>Open and review each school consent form</Text>
+            </View>
+          </Card>
+          {!!available.length && <SectionTitle title="Available Forms" />}
+          {available.map((form) => (
+            <FormCard
+              key={form.id}
+              form={form}
+              onComplete={setActiveForm}
+              onView={setViewingForm}
+            />
+          ))}
+          {!!outstanding.length && <SectionTitle title="Outstanding Forms" />}
+          {outstanding.map((form) => (
+            <FormCard
+              key={form.id}
+              form={form}
+              onComplete={setActiveForm}
+              onView={setViewingForm}
+            />
+          ))}
+          {!!signed.length && <SectionTitle title="Signed Forms" />}
+          {signed.map((form) => (
+            <FormCard
+              key={form.id}
+              form={form}
+              onComplete={setActiveForm}
+              onView={setViewingForm}
+            />
+          ))}
+          <ConsentFormViewer form={viewingForm} onClose={() => setViewingForm(null)} />
+          <ConsentEditor
+            form={activeForm}
+            applicationReference={applicationReference || ''}
+            onClose={() => setActiveForm(null)}
+            onCompleted={async (formId, completion) => {
+              if (!token) throw new Error('Please sign in again.');
+              await apiData(`/mobile/consent-forms/${encodeURIComponent(formId)}/complete`, {
                 method: 'POST',
                 token,
-                body: JSON.stringify({ childName: students[0]?.name || 'My child' }),
-              },
-            );
-            await Linking.openURL(result.url);
-          } catch (error) {
-            Alert.alert(
-              'Online signing unavailable',
-              error instanceof Error
-                ? error.message
-                : 'Use Sign & Complete to create the PDF locally.',
-            );
-          }
-        }}
-        onCompleted={async (formId, completion) => {
-          const next = { ...completedForms, [formId]: completion };
-          setCompletedForms(next);
-          await AsyncStorage.setItem(storageKey, JSON.stringify(next));
-          setActiveForm(null);
-        }}
-      />
+                body: JSON.stringify({
+                  ...completion,
+                  studentId: enrolledStudent?.id ?? null,
+                  documentHtml: consentFormHtml(activeForm!, completion),
+                }),
+              });
+              const next = { ...completedForms, [formId]: completion };
+              setCompletedForms(next);
+              await AsyncStorage.setItem(storageKey, JSON.stringify(next));
+              setActiveForm(null);
+              await refresh();
+            }}
+          />
+        </>
+      )}
     </Screen>
   );
 }
@@ -354,35 +393,113 @@ function readableDate(value: string | null, prefix: string) {
     : `${prefix} ${parsed.toLocaleDateString()}`;
 }
 
-async function viewForm(form: DisplayForm) {
-  try {
-    if (form.documentUrl) {
+async function openPrintableForm(form: DisplayForm) {
+  if (form.documentUrl) {
+    try {
       await Linking.openURL(form.documentUrl);
       return;
+    } catch {
+      // A stale or private Cloudinary URL must not stop the parent viewing the
+      // form. Fall through to a locally rendered copy below.
     }
+  }
+  try {
     await Print.printAsync({ html: consentFormHtml(form, form.completion || undefined) });
   } catch {
-    Alert.alert('Unable to open form', 'Please check your connection and try again.');
+    Alert.alert('Unable to open printable copy', 'The form is still available in the viewer.');
   }
 }
 
-async function signForm(form: DisplayForm) {
-  if (!form.signerUrl) {
-    Alert.alert(
-      'Online signing is not configured',
-      'The school must add a signing URL to this form first.',
-    );
-    return;
-  }
-  await Linking.openURL(form.signerUrl);
+function ConsentFormViewer({ form, onClose }: { form: DisplayForm | null; onClose: () => void }) {
+  if (!form) return null;
+  const completion = form.completion;
+  return (
+    <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <View style={styles.editorSafe}>
+        <View style={styles.editorHeader}>
+          <Pressable onPress={onClose} hitSlop={12} accessibilityLabel="Close form viewer">
+            <Ionicons name="close" size={26} color={colors.ink} />
+          </Pressable>
+          <Text style={styles.editorHeaderTitle}>View consent form</Text>
+          <Pressable
+            onPress={() => void openPrintableForm(form)}
+            hitSlop={12}
+            accessibilityLabel="Open printable form"
+          >
+            <Ionicons name="document-text-outline" size={24} color={colors.green} />
+          </Pressable>
+        </View>
+        <ScrollView contentContainerStyle={styles.editorContent}>
+          <View style={styles.editorDocument}>
+            <Text style={styles.editorBrand}>MOBSIE CONNECT</Text>
+            <Text style={styles.editorTitle}>{form.title}</Text>
+            <Text style={styles.body}>{form.description}</Text>
+            <View style={styles.declarationBox}>
+              <Text style={styles.cardTitle}>Parent / guardian declaration</Text>
+              {form.clauses.map((clause) => (
+                <Text key={clause} style={styles.editorClause}>
+                  ✓ {clause}
+                </Text>
+              ))}
+            </View>
+            {completion ? (
+              <View style={styles.viewerDetails}>
+                <ViewerDetail
+                  label="Application reference"
+                  value={completion.applicationReference}
+                />
+                <ViewerDetail label="Child's full name" value={completion.childName} />
+                <ViewerDetail label="Parent / guardian" value={completion.guardianName} />
+                <ViewerDetail label="ID or passport number" value={completion.guardianId} />
+                <ViewerDetail label="Electronic signature" value={completion.signature} signature />
+                <ViewerDetail label="Date signed" value={completion.signedAt} />
+              </View>
+            ) : (
+              <View style={styles.viewerNotice}>
+                <Ionicons
+                  name={form.status === 'SIGNED' ? 'checkmark-circle' : 'information-circle'}
+                  size={19}
+                  color={form.status === 'SIGNED' ? colors.green : colors.orange}
+                />
+                <Text style={styles.viewerNoticeText}>
+                  {form.status === 'SIGNED'
+                    ? 'This form is recorded as signed. Use the document button above to open the saved copy when available.'
+                    : 'Review this form, close the viewer, then choose Sign & Complete when you are ready.'}
+                </Text>
+              </View>
+            )}
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+function ViewerDetail({
+  label,
+  value,
+  signature = false,
+}: {
+  label: string;
+  value: string;
+  signature?: boolean;
+}) {
+  return (
+    <View style={styles.viewerDetail}>
+      <Text style={styles.editorLabel}>{label}</Text>
+      <Text style={[styles.viewerDetailValue, signature && styles.viewerSignature]}>{value}</Text>
+    </View>
+  );
 }
 
 function FormCard({
   form,
   onComplete,
+  onView,
 }: {
   form: DisplayForm;
   onComplete: (form: DisplayForm) => void;
+  onView: (form: DisplayForm) => void;
 }) {
   const isSigned = form.status === 'SIGNED';
   const isOutstanding = form.status === 'OUTSTANDING';
@@ -401,13 +518,9 @@ function FormCard({
         <Text style={styles.subtle}>{dateText || form.description}</Text>
       </View>
       <View style={styles.formActions}>
-        <Button title="View" color={colors.green} outline onPress={() => viewForm(form)} />
+        <Button title="View" color={colors.green} outline onPress={() => onView(form)} />
         {!isSigned && (
-          <Button
-            title={form.signerUrl ? 'Sign Online' : 'Complete'}
-            color={colors.orange}
-            onPress={() => (form.signerUrl ? signForm(form) : onComplete(form))}
-          />
+          <Button title="Sign & Complete" color={colors.orange} onPress={() => onComplete(form)} />
         )}
       </View>
     </Card>
@@ -416,13 +529,13 @@ function FormCard({
 
 function ConsentEditor({
   form,
+  applicationReference,
   onClose,
-  onHostedSign,
   onCompleted,
 }: {
   form: DisplayForm | null;
+  applicationReference: string;
   onClose: () => void;
-  onHostedSign: (form: DisplayForm) => Promise<void>;
   onCompleted: (formId: string, completion: ConsentFormCompletion) => Promise<void>;
 }) {
   const { students } = useSchoolData();
@@ -430,6 +543,7 @@ function ConsentEditor({
   const [guardianName, setGuardianName] = useState('');
   const [guardianId, setGuardianId] = useState('');
   const [signature, setSignature] = useState('');
+  const [reference, setReference] = useState('');
   const [accepted, setAccepted] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -439,11 +553,13 @@ function ConsentEditor({
     setGuardianName('');
     setGuardianId('');
     setSignature('');
+    setReference(applicationReference);
     setAccepted(false);
   }, [form?.id]);
 
   if (!form) return null;
   const completion = (): ConsentFormCompletion => ({
+    applicationReference: reference.trim(),
     childName: childName.trim(),
     guardianName: guardianName.trim(),
     guardianId: guardianId.trim(),
@@ -451,10 +567,23 @@ function ConsentEditor({
     signedAt: new Date().toLocaleDateString(),
   });
   const validate = () => {
-    if (!childName.trim() || !guardianName.trim() || !guardianId.trim() || !signature.trim()) {
+    if (
+      !reference.trim() ||
+      !childName.trim() ||
+      !guardianName.trim() ||
+      !guardianId.trim() ||
+      !signature.trim()
+    ) {
       Alert.alert(
         'Complete the form',
         'Child, guardian, ID/passport and signature fields are required.',
+      );
+      return false;
+    }
+    if (reference.trim().toUpperCase() !== applicationReference.trim().toUpperCase()) {
+      Alert.alert(
+        'Reference does not match',
+        'Use the application reference issued for your enrolled child.',
       );
       return false;
     }
@@ -469,28 +598,39 @@ function ConsentEditor({
     if (!validate() || saving) return;
     setSaving(true);
     try {
-      const result = await Print.printToFileAsync({ html: consentFormHtml(form, completion()) });
       await onCompleted(form.id, completion());
-      Alert.alert('Form completed', 'Your signed consent PDF has been created.', [
-        { text: 'Done' },
-        {
-          text: 'Share PDF',
-          onPress: () =>
-            Sharing.shareAsync(result.uri, {
-              mimeType: 'application/pdf',
-              dialogTitle: form.title,
-            }).catch(() => undefined),
-        },
-      ]);
-    } catch {
-      Alert.alert('Could not complete form', 'The PDF could not be generated. Please try again.');
+      // Persist first. PDF generation is a convenience and must never block a
+      // parent from completing a form or make the dashboard record disappear.
+      try {
+        const result = await Print.printToFileAsync({ html: consentFormHtml(form, completion()) });
+        Alert.alert('Form completed', 'Your signed consent is now saved to your school record.', [
+          { text: 'Done' },
+          {
+            text: 'Share PDF',
+            onPress: () =>
+              Sharing.shareAsync(result.uri, {
+                mimeType: 'application/pdf',
+                dialogTitle: form.title,
+              }).catch(() => undefined),
+          },
+        ]);
+      } catch {
+        Alert.alert('Form completed', 'Your signed consent is saved to your school record.');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Please try again.';
+      Alert.alert('Could not complete form', message);
     } finally {
       setSaving(false);
     }
   };
   return (
     <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <View style={styles.editorSafe}>
+      <KeyboardAvoidingView
+        style={styles.editorSafe}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 16 : 0}
+      >
         <View style={styles.editorHeader}>
           <Pressable onPress={onClose} hitSlop={12}>
             <Ionicons name="close" size={26} color={colors.ink} />
@@ -502,6 +642,7 @@ function ConsentEditor({
         </View>
         <ScrollView
           contentContainerStyle={styles.editorContent}
+          keyboardDismissMode="on-drag"
           keyboardShouldPersistTaps="handled"
         >
           <View style={styles.editorDocument}>
@@ -516,6 +657,11 @@ function ConsentEditor({
                 </Text>
               ))}
             </View>
+            <EditorField
+              label="Child application reference"
+              value={reference}
+              onChangeText={setReference}
+            />
             <EditorField label="Child's full name" value={childName} onChangeText={setChildName} />
             <EditorField
               label="Parent / guardian full name"
@@ -545,18 +691,12 @@ function ConsentEditor({
             </Pressable>
           </View>
           <Button title="Preview PDF" color={colors.green} outline onPress={preview} />
-          <Button
-            title="Sign securely with Pacta"
-            color={colors.green}
-            onPress={() => onHostedSign(form)}
-          />
           <Button title={saving ? 'Creating signed PDF…' : 'Sign & Complete'} onPress={submit} />
           <Text style={styles.editorHelp}>
-            For hosted legal signing, the dashboard can supply a Pacta public direct-link URL. API
-            keys remain on the server.
+            A signed copy is securely saved to your school record.
           </Text>
         </ScrollView>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -589,26 +729,17 @@ function EditorField({
 export function FeedbackScreen() {
   const [message, setMessage] = useState('');
   const [rating, setRating] = useState(5);
-  const { submitFeedback, refresh } = useSchoolData();
+  const [submitting, setSubmitting] = useState(false);
+  const { feedback, submitFeedback, refresh, loading } = useSchoolData();
+  useFocusEffect(
+    React.useCallback(() => {
+      refresh().catch(() => undefined);
+    }, [refresh]),
+  );
   return (
     <Screen onRefresh={refresh}>
       <FeatureHeader title="Feedback Centre" />
-      <Button title="New Feedback" icon="add" />
-      <SectionTitle title="Suggestions" />
-      <FeedbackCard
-        icon="bulb"
-        title="Suggestion: More outdoor activities"
-        body="Sarah L. · Thank you for your feedback. We added two outdoor play sessions this term."
-        color={colors.blue}
-      />
-      <SectionTitle title="Incident Reports" />
-      <FeedbackCard
-        icon="alert-circle"
-        title="Minor playground scrape"
-        body="Mike R. · Ice was applied and the parent was notified immediately."
-        color={colors.orange}
-      />
-      <SectionTitle title="Rate School Lunch Program" />
+      <SectionTitle title="New Feedback" />
       <Card>
         <View style={styles.ratingRow}>
           {[1, 2, 3, 4, 5].map((value) => (
@@ -618,25 +749,77 @@ export function FeedbackScreen() {
           ))}
         </View>
         <Field
-          label="Optional comment"
+          label="Your feedback"
           value={message}
           onChangeText={setMessage}
           placeholder="Tell us what you think..."
           multiline
         />
+
         <Button
-          title="Submit Feedback"
+          title={submitting ? 'Submitting…' : 'Submit Feedback'}
           onPress={async () => {
+            if (!message.trim()) {
+              Alert.alert('Add your feedback', 'Please enter a message before submitting.');
+              return;
+            }
             try {
-              await submitFeedback(message, rating, 'RATING');
-              Alert.alert('Thank you', 'Your feedback was saved to the dashboard.');
+              setSubmitting(true);
+              await submitFeedback(message.trim(), rating, 'RATING');
               setMessage('');
+              setRating(5);
+              Alert.alert('Thank you', 'Your feedback is saved and appears below.');
             } catch (error) {
               Alert.alert('Unable to save feedback', (error as Error).message);
+            } finally {
+              setSubmitting(false);
             }
           }}
         />
       </Card>
+      <View style={styles.feedbackHistoryHeader}>
+        <SectionTitle title="Your Feedback" />
+        <View style={styles.feedbackCountBadge}>
+          <Text style={styles.feedbackCountText}>{feedback.length}</Text>
+        </View>
+      </View>
+      {loading && !feedback.length ? (
+        <ActivityIndicator color={colors.green} style={{ marginVertical: 20 }} />
+      ) : feedback.length ? (
+        feedback.map((item) => {
+          const createdAt = new Date(item.createdAt);
+          const date = Number.isNaN(createdAt.getTime())
+            ? 'Recently submitted'
+            : createdAt.toLocaleDateString('en-ZA', {
+                day: 'numeric',
+                month: 'short',
+                year: 'numeric',
+              });
+          const resolved = item.status === 'RESOLVED';
+          return (
+            <FeedbackCard
+              key={item.id}
+              icon={resolved ? 'checkmark-circle' : 'chatbubble-ellipses'}
+              title={
+                item.category === 'RATING' ? 'School feedback' : item.category.replace(/_/g, ' ')
+              }
+              body={item.message}
+              color={resolved ? colors.green : colors.orange}
+              meta={`${item.rating ? `${'★'.repeat(item.rating)} · ` : ''}${date}`}
+              status={item.status}
+              reply={item.reply}
+              repliedAt={item.repliedAt}
+              repliedByName={item.repliedByName}
+            />
+          );
+        })
+      ) : (
+        <Card style={styles.feedbackEmpty}>
+          <Ionicons name="chatbubble-outline" size={30} color={colors.green} />
+          <Text style={styles.cardTitle}>No feedback submitted yet</Text>
+          <Text style={styles.subtle}>Your feedback will appear here after you send it.</Text>
+        </Card>
+      )}
     </Screen>
   );
 }
@@ -646,27 +829,58 @@ function FeedbackCard({
   title,
   body,
   color,
+  meta,
+  status,
+  reply,
+  repliedAt,
+  repliedByName,
 }: {
   icon: IconName;
   title: string;
   body: string;
   color: string;
+  meta?: string;
+  status?: string;
+  reply?: string | null;
+  repliedAt?: string | null;
+  repliedByName?: string | null;
 }) {
+  const replyDate = repliedAt ? new Date(repliedAt) : null;
+  const replyMeta =
+    replyDate && !Number.isNaN(replyDate.getTime())
+      ? replyDate.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' })
+      : null;
   return (
     <Card style={styles.listCard}>
       <View style={[styles.iconBox, { backgroundColor: `${color}18` }]}>
         <Ionicons name={icon} size={20} color={color} />
       </View>
       <View style={styles.flex}>
-        <Text style={styles.cardTitle}>{title}</Text>
+        <View style={styles.feedbackCardHeading}>
+          <Text style={[styles.cardTitle, styles.flex]}>{title}</Text>
+          {!!status && <Text style={styles.feedbackStatus}>{status.toLowerCase()}</Text>}
+        </View>
         <Text style={styles.subtle}>{body}</Text>
+        {!!meta && <Text style={styles.feedbackMeta}>{meta}</Text>}
+        {!!reply && (
+          <View style={styles.feedbackReply}>
+            <View style={styles.feedbackReplyHeading}>
+              <Ionicons name="return-down-forward" size={15} color={colors.green} />
+              <Text style={styles.feedbackReplyTitle}>
+                {repliedByName || 'Mobsie Kids'} replied
+              </Text>
+            </View>
+            <Text style={styles.feedbackReplyBody}>{reply}</Text>
+            {!!replyMeta && <Text style={styles.feedbackReplyMeta}>{replyMeta}</Text>}
+          </View>
+        )}
       </View>
     </Card>
   );
 }
 
 export function NewsletterScreen() {
-  const { newsletters, events, refresh, loading } = useSchoolData();
+  const { newsletters, refresh, loading } = useSchoolData();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   useFocusEffect(
     React.useCallback(() => {
@@ -676,11 +890,17 @@ export function NewsletterScreen() {
   const list = newsletters.map((item: any, index: number) => {
     const rawDate = item.publishedAt || item.createdAt || item.sentAt || item.sent;
     const parsedDate = rawDate ? new Date(rawDate) : null;
+    const content = item.content && typeof item.content === 'object' ? item.content : {};
     return {
       ...item,
+      content,
       id: String(item.id || `newsletter-${index}`),
       title: item.title || item.subject || 'School Newsletter',
-      body: item.body || item.message || 'Open this newsletter to read the latest school news.',
+      body:
+        content.intro ||
+        item.body ||
+        item.message ||
+        'Open this newsletter to read the latest school news.',
       audience: item.audience || item.branchName || 'All branches',
       displayDate:
         parsedDate && !Number.isNaN(parsedDate.getTime())
@@ -690,7 +910,13 @@ export function NewsletterScreen() {
               year: 'numeric',
             })
           : rawDate || 'Latest edition',
-      imageUrl: item.imageUrl || item.coverUrl || item.thumbnailUrl || null,
+      imageUrl:
+        content.featureImageUrl ||
+        content.headerImageUrl ||
+        item.imageUrl ||
+        item.coverUrl ||
+        item.thumbnailUrl ||
+        null,
     };
   });
   const selected = list.find((item: any) => item.id === selectedId);
@@ -765,11 +991,23 @@ export function NewsletterScreen() {
     );
   }
 
-  const title = selected.title;
-  const heading = title.replace(/newsletter/i, '').trim() || title;
-  const principalMessage =
-    selected.body ||
-    'As we begin another exciting month, we would like to thank you for your continued support and partnership in your child’s learning journey. Our dedicated teachers remain committed to creating a safe, engaging and nurturing environment where every learner can thrive.';
+  const content = selected.content || {};
+  const heroTitle = content.heroTitle || 'A bright week at Mobsie';
+  const featureTitle = content.featureTitle || selected.title;
+  const intro = content.intro || selected.body;
+  const featureCopy = content.featureCopy || selected.body;
+  const ctaText = content.ctaText || 'View update';
+  const ctaLink = content.ctaLink || 'https://mobsiekids.co.za';
+  const footer = content.footer || 'Thank you for being part of our school community.';
+  const footerImageUrl = content.footerImageUrl || '';
+  const headerImageUrl = content.headerImageUrl || '';
+  const featureImageUrl = content.featureImageUrl || selected.imageUrl || '';
+  const openNewsletterLink = () => {
+    if (!ctaLink) return;
+    Linking.openURL(ctaLink).catch(() =>
+      Alert.alert('Unable to open link', 'Please try again in a moment.'),
+    );
+  };
   return (
     <Screen onRefresh={refresh} style={styles.newsletterScreen}>
       <View style={styles.newsletterReaderHeader}>
@@ -779,94 +1017,81 @@ export function NewsletterScreen() {
         <Text style={styles.newsletterReaderLabel}>Newsletter</Text>
         <Ionicons name="bookmark-outline" size={21} color={colors.ink} />
       </View>
-      {selected.imageUrl && (
-        <Image
-          source={{ uri: selected.imageUrl }}
-          style={styles.newsletterReaderCover}
-          resizeMode="cover"
-        />
-      )}
-      <Text style={styles.newsletterTitle}>
-        {heading}
-        {`\n`}
-        <Text style={{ color: colors.orange }}>Newsletter</Text>
-      </Text>
-      <View style={styles.newsletterMetaRow}>
-        <Text style={styles.newsletterMeta}>{selected.audience}</Text>
-        <Text style={styles.newsletterMeta}>{selected.displayDate}</Text>
-      </View>
-      <Card style={styles.principalCard}>
-        <View style={styles.flex}>
-          <Text style={styles.headingSmall}>Principal’s Message</Text>
-          <Text style={styles.newsletterBody}>{principalMessage}</Text>
-          <Text style={styles.newsletterRegards}>Best Regards</Text>
-          <Text style={styles.newsletterPrincipal}>Principal</Text>
+      <View style={styles.newsletterEmail}>
+        <View style={styles.newsletterEmailHeader}>
+          <Image
+            source={images.logo}
+            style={styles.newsletterEmailLogo}
+            resizeMode="contain"
+            accessibilityLabel="Mobsie Kids"
+          />
         </View>
-        <View style={styles.principalPhotoRing}>
-          <Image source={images.teachers[0]} style={styles.principalPhoto} resizeMode="cover" />
-        </View>
-      </Card>
-
-      <Text style={styles.newsSectionTitle}>School News</Text>
-      <View style={styles.twoColumns}>
-        <Card style={styles.newsTile}>
-          <Text style={styles.newsTileTitle}>New Playground{`\n`}Equipment</Text>
-          <Text style={styles.playgroundEmoji}>🛝</Text>
-        </Card>
-        <Card style={styles.newsTile}>
-          <Text style={styles.newsTileTitle}>Staff Updates</Text>
-          <Text style={styles.newsTileBody}>
-            We are pleased to welcome new educators to the Mobsie family this month. Their
-            experience and passion for early childhood development will further strengthen our
-            learning programmes.
-          </Text>
-        </Card>
-      </View>
-
-      <View style={styles.newsletterColumns}>
-        <View style={styles.newsletterColumn}>
-          <Text style={styles.newsColumnTitle}>
-            Upcoming <Text style={{ color: colors.orange }}>Events</Text>
-          </Text>
-          {(events.length
-            ? events.slice(0, 4).map((event) => ({
-                title: event.title,
-                date: new Date(event.startsAt).toLocaleDateString('en-ZA', {
-                  month: 'long',
-                  day: 'numeric',
-                }),
-              }))
-            : [{ title: 'No upcoming events', date: '' }]
-          ).map((event, index) => (
-            <View key={`${event.title}-${index}`} style={styles.newsEventRow}>
-              <Text style={styles.newsEventDot}>●</Text>
-              <View style={styles.flex}>
-                <Text style={styles.newsEventTitle}>{event.title}</Text>
-                {!!event.date && <Text style={styles.newsEventDate}>{event.date}</Text>}
-              </View>
+        {headerImageUrl ? (
+          <ImageBackground
+            source={{ uri: headerImageUrl }}
+            style={styles.newsletterEmailHero}
+            imageStyle={styles.newsletterEmailHeroImage}
+          >
+            <View style={styles.newsletterEmailHeroOverlay}>
+              <Text style={styles.newsletterEmailHeroTitle}>{heroTitle}</Text>
             </View>
-          ))}
-        </View>
-        <View style={styles.newsletterColumn}>
-          <Text style={styles.newsColumnTitle}>Learner</Text>
-          <Card style={styles.learnerCard}>
-            <Ionicons
-              name="star-outline"
-              size={23}
-              color={colors.amber}
-              style={styles.learnerStar}
+          </ImageBackground>
+        ) : (
+          <View style={styles.newsletterEmailHeroFallback}>
+            <Text style={styles.newsletterEmailHeroTitle}>{heroTitle}</Text>
+          </View>
+        )}
+        <View style={styles.newsletterEmailBody}>
+          <Text style={styles.newsletterEmailTitle}>{featureTitle}</Text>
+          <Text style={styles.newsletterEmailCopy}>{intro}</Text>
+          {featureImageUrl ? (
+            <Image
+              source={{ uri: featureImageUrl }}
+              style={styles.newsletterEmailFeatureImage}
+              resizeMode="cover"
             />
-            <Text style={styles.newsTileTitle}>Learner{`\n`}Achievements</Text>
-            <Text style={styles.learnerLine}>👧　Star Students</Text>
-            <Text style={styles.learnerCopy}>Maya showed great children creativity.</Text>
-            <Text style={styles.learnerLine}>🧒　Star Students</Text>
-            <Text style={styles.learnerCopy}>Maya read family students.</Text>
-          </Card>
+          ) : (
+            <View style={styles.newsletterEmailFeatureFallback}>
+              <Ionicons name="image-outline" size={30} color="#8C7CA7" />
+              <Text style={styles.newsletterEmailFeatureFallbackText}>School update</Text>
+            </View>
+          )}
+          <Text style={styles.newsletterEmailCopy}>{featureCopy}</Text>
+          {!!ctaText && (
+            <Pressable
+              accessibilityRole="link"
+              disabled={!ctaLink}
+              onPress={openNewsletterLink}
+              style={({ pressed }) => [
+                styles.newsletterEmailCta,
+                pressed && ctaLink ? { opacity: 0.82 } : null,
+              ]}
+            >
+              <Text style={styles.newsletterEmailCtaText}>{ctaText}</Text>
+            </Pressable>
+          )}
         </View>
-      </View>
-
-      <View style={styles.newsletterFooter}>
-        <Button title="Learn More" color={colors.orange} />
+        {footerImageUrl ? (
+          <ImageBackground
+            source={{ uri: footerImageUrl }}
+            style={styles.newsletterEmailFooterImage}
+            imageStyle={styles.newsletterEmailFooterBackground}
+          >
+            <View style={styles.newsletterEmailFooterOverlay}>
+              <Text style={[styles.newsletterEmailFooterText, styles.newsletterEmailFooterTextOnImage]}>{footer}</Text>
+              <Text style={[styles.newsletterEmailFooterMeta, styles.newsletterEmailFooterTextOnImage]}>
+                Mobsie Kids · You are receiving this because your family is connected to Mobsie.
+              </Text>
+            </View>
+          </ImageBackground>
+        ) : (
+          <View style={styles.newsletterEmailFooter}>
+            <Text style={styles.newsletterEmailFooterText}>{footer}</Text>
+            <Text style={styles.newsletterEmailFooterMeta}>
+              Mobsie Kids · You are receiving this because your family is connected to Mobsie.
+            </Text>
+          </View>
+        )}
       </View>
     </Screen>
   );
@@ -875,6 +1100,7 @@ export function NewsletterScreen() {
 export function NotificationsScreen() {
   const navigation = useNavigation<any>();
   const { notifications: remoteNotifications, refresh } = useSchoolData();
+  const { token } = useAuth();
   const palette = [colors.orange, '#3F8CFF', '#FF4E5C', '#706AF2', '#EE4B91', '#18C58F'];
   const icons: IconName[] = [
     'bus-outline',
@@ -889,6 +1115,8 @@ export function NotificationsScreen() {
       const rawTime = item.time || item.date || item.createdAt || item.created_at || '';
       const parsedTime = rawTime ? new Date(rawTime) : null;
       return {
+        id: item.id,
+        data: item.data && typeof item.data === 'object' ? item.data : {},
         title: item.title || item.name || 'School notification',
         body: item.body || item.message || '',
         color: item.color || palette[index % palette.length],
@@ -918,8 +1146,20 @@ export function NotificationsScreen() {
         </Pressable>
       </View>
       {list.map((item: any, index: number) => (
-        <Card
+        <Pressable
           key={`${item.title}-${index}`}
+          onPress={() => {
+            openNotificationDestination(navigation, item.data);
+            if (token && item.id) {
+              apiData('/mobile/notifications', {
+                method: 'PATCH',
+                token,
+                body: JSON.stringify({ id: item.id }),
+              })
+                .then(() => refresh())
+                .catch(() => undefined);
+            }
+          }}
           style={[styles.notificationCard, { borderLeftColor: item.color }]}
         >
           <View style={[styles.notificationIcon, { backgroundColor: `${item.color}12` }]}>
@@ -930,7 +1170,7 @@ export function NotificationsScreen() {
             <Text style={styles.notificationBody}>{item.body}</Text>
           </View>
           <Text style={styles.notificationTime}>{item.time}</Text>
-        </Card>
+        </Pressable>
       ))}
     </Screen>
   );
@@ -1062,32 +1302,72 @@ export function StoreScreen() {
 
 function ProductCard({ product }: { product: Product }) {
   const { addToCart } = useSchoolData();
+  const [selectedColor, setSelectedColor] = useState<string>();
+  const availableColors = product.colors ?? [];
   return (
     <Card style={styles.productCard}>
       <View style={[styles.productArt, { backgroundColor: '#F3F4F6' }]}>
         <Image
           source={product.imageUrl ? { uri: product.imageUrl } : images.logo}
           style={styles.productImage}
-          resizeMode="contain"
+          resizeMode="cover"
         />
       </View>
       <Text style={styles.cardTitle}>{product.name}</Text>
       <Text style={styles.price}>
         R{Number(product.price).toFixed(2)} · {product.stock} left
       </Text>
-      <Button title="Add to cart" color={colors.orange} onPress={() => addToCart(product)} />
+      {!!availableColors.length && (
+        <View style={styles.productColorOptions}>
+          {availableColors.map((color) => (
+            <Pressable
+              key={color}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: selectedColor === color }}
+              onPress={() => setSelectedColor(color)}
+              style={[
+                styles.productColorOption,
+                selectedColor === color && styles.productColorOptionSelected,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.productColorText,
+                  selectedColor === color && styles.productColorTextSelected,
+                ]}
+              >
+                {color}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+      <Button
+        title={availableColors.length && !selectedColor ? 'Select a colour' : 'Add to cart'}
+        color={colors.orange}
+        onPress={() => {
+          if (availableColors.length && !selectedColor) {
+            Alert.alert('Select a colour', `Choose a colour for ${product.name} first.`);
+            return;
+          }
+          addToCart(product, selectedColor);
+        }}
+      />
     </Card>
   );
 }
 
 export function CartScreen() {
-  const { cart, changeQuantity, checkout } = useSchoolData();
+  const { cart, changeQuantity, checkout, students } = useSchoolData();
   const subtotal = cart.reduce((sum, product) => sum + Number(product.price) * product.quantity, 0);
+  const enrolledStudent = students.find((student) =>
+    ['ENROLLED', 'ACTIVE'].includes(String(student.enrollmentStatus).toUpperCase()),
+  );
   return (
     <Screen>
       <FeatureHeader title={`Shopping Cart (${cart.length})`} />
       {cart.map((product) => (
-        <Card key={product.id} style={styles.listCard}>
+        <Card key={product.cartKey} style={styles.listCard}>
           <View style={[styles.iconBox, { backgroundColor: '#F3F4F6' }]}>
             <Image
               source={product.imageUrl ? { uri: product.imageUrl } : images.logo}
@@ -1097,14 +1377,17 @@ export function CartScreen() {
           </View>
           <View style={styles.flex}>
             <Text style={styles.cardTitle}>{product.name}</Text>
+            {!!product.selectedColor && (
+              <Text style={styles.subtle}>Colour: {product.selectedColor}</Text>
+            )}
             <Text style={styles.price}>R{Number(product.price * product.quantity).toFixed(2)}</Text>
           </View>
           <View style={styles.quantityControls}>
-            <Pressable onPress={() => changeQuantity(product.id, -1)}>
+            <Pressable onPress={() => changeQuantity(product.cartKey, -1)}>
               <Text style={styles.quantity}>−</Text>
             </Pressable>
             <Text>{product.quantity}</Text>
-            <Pressable onPress={() => changeQuantity(product.id, 1)}>
+            <Pressable onPress={() => changeQuantity(product.cartKey, 1)}>
               <Text style={styles.quantity}>+</Text>
             </Pressable>
           </View>
@@ -1116,8 +1399,8 @@ export function CartScreen() {
       <Card>
         {[
           ['Subtotal', subtotal],
-          ['Delivery Fee', 50],
-          ['Total', subtotal + 50],
+          ['Collection fee', 0],
+          ['Total', subtotal],
         ].map(([label, value]) => (
           <View key={label} style={styles.summaryRow}>
             <Text style={label === 'Total' ? styles.headingSmall : styles.body}>{label}</Text>
@@ -1125,17 +1408,27 @@ export function CartScreen() {
           </View>
         ))}
       </Card>
+      <Card>
+        <Text style={styles.cardTitle}>Collection</Text>
+        <Text style={styles.subtle}>
+          {enrolledStudent
+            ? `Collect from ${enrolledStudent.branchName}. We will notify you when the order is ready.`
+            : 'Complete enrolment before ordering so we can assign the correct collection branch.'}
+        </Text>
+      </Card>
       <Button
-        title="Checkout"
+        title="Pay securely with PayFast"
         onPress={async () => {
           if (!cart.length) return Alert.alert('Cart is empty');
-          try {
-            const order = await checkout();
-            Alert.alert(
-              'Order placed',
-              `${order.reference} is reserved. Pay by bank transfer to confirm your order.\n\n` +
-                `${UNIFORM_BANKING.accountName}\n${UNIFORM_BANKING.bank}\nAccount: ${UNIFORM_BANKING.accountNumber}\n\n${UNIFORM_BANKING.referenceHint}`,
+          if (!enrolledStudent?.branchId)
+            return Alert.alert(
+              'Complete enrolment first',
+              'Your child must be enrolled before an order can be assigned to a collection branch.',
             );
+          try {
+            const order = await checkout(enrolledStudent.branchId);
+            if (!order.checkoutUrl) throw new Error('PayFast checkout could not be started.');
+            await Linking.openURL(order.checkoutUrl);
           } catch (error) {
             Alert.alert('Checkout failed', (error as Error).message);
           }
@@ -1147,20 +1440,66 @@ export function CartScreen() {
 }
 
 export function OrdersScreen() {
-  const { orders, refresh, loading } = useSchoolData();
+  const { orders, products, refreshOrders, loading } = useSchoolData();
+  useFocusEffect(
+    useCallback(() => {
+      void refreshOrders().catch(() => undefined);
+    }, [refreshOrders]),
+  );
   return (
-    <Screen onRefresh={refresh}>
+    <Screen onRefresh={refreshOrders}>
       <FeatureHeader title="My Orders" />
       {loading && <ActivityIndicator color={colors.green} />}
       {orders.map((order) => (
-        <Card key={order.id} style={styles.listCard}>
-          <Ionicons name="receipt-outline" size={24} color={colors.green} />
-          <View style={styles.flex}>
-            <Text style={styles.cardTitle}>{order.reference}</Text>
-            <Text style={styles.subtle}>
-              {order.status.replaceAll('_', ' ')} · R{(order.totalInCents / 100).toFixed(2)}
-            </Text>
+        <Card key={order.id} style={styles.orderCard}>
+          <View style={styles.orderHeader}>
+            <View style={styles.orderIcon}>
+              <Ionicons name="receipt-outline" size={24} color={colors.green} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>{order.reference.replace(/^ORD-\d{4}-/, 'ORD-')}</Text>
+              <Text style={styles.subtle}>
+                {sentenceCase(order.status)}
+                {order.createdAt && !Number.isNaN(new Date(order.createdAt).getTime())
+                  ? ` · ${new Date(order.createdAt).toLocaleDateString()}`
+                  : ''}
+              </Text>
+            </View>
+            <Text style={styles.orderTotal}>R{(order.totalInCents / 100).toFixed(2)}</Text>
           </View>
+          {!!order.items?.length && (
+            <View style={styles.orderItems}>
+              {order.items.map((item, index) => {
+                const productImageUrl = products.find(
+                  (product) => product.id === item.productId,
+                )?.imageUrl;
+                return (
+                  <View key={`${item.productId || item.name}-${index}`} style={styles.orderItemRow}>
+                    <Image
+                      source={productImageUrl ? { uri: productImageUrl } : images.logo}
+                      style={styles.orderItemImage}
+                      resizeMode="cover"
+                    />
+                    <Text style={styles.orderItemName}>
+                      {item.quantity} × {item.name}
+                      {item.selectedColor ? ` · ${item.selectedColor}` : ''}
+                    </Text>
+                    {typeof item.unitPriceInCents === 'number' && (
+                      <Text style={styles.subtle}>
+                        R{((item.unitPriceInCents * item.quantity) / 100).toFixed(2)}
+                      </Text>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          )}
+          {!!order.branchName && (
+            <View style={styles.orderCollection}>
+              <Ionicons name="location-outline" size={15} color={colors.green} />
+              <Text style={styles.subtle}>Collect from {order.branchName}</Text>
+            </View>
+          )}
         </Card>
       ))}
       {!loading && !orders.length && (
@@ -1168,8 +1507,7 @@ export function OrdersScreen() {
           <Text style={styles.subtle}>No orders yet.</Text>
         </Card>
       )}
-      <Button title="Refresh Orders" outline onPress={refresh} />
-
+      <Button title="Refresh Orders" outline onPress={refreshOrders} />
     </Screen>
   );
 }
@@ -1182,45 +1520,56 @@ function productImage(id: string) {
   return images.logo;
 }
 
-
+function ShopBottomNav({ active }: { active: 'Shop' | 'Cart' | 'Orders' }) {
+  const navigation = useNavigation<any>();
+  const items = [
+    ['Home', 'home-outline', () => navigation.navigate('Tabs', { screen: 'Home' })],
+    ['Shop', 'grid-outline', () => navigation.navigate('Store')],
+    ['Orders', 'receipt-outline', () => navigation.navigate('Orders')],
+    ['Account', 'person-outline', () => navigation.navigate('Tabs', { screen: 'Profile' })],
+  ] as const;
+  return (
+    <View style={styles.shopBottomNav}>
+      {items.map(([label, icon, onPress]) => (
+        <Pressable key={label} style={styles.shopBottomItem} onPress={onPress}>
+          <Ionicons
+            name={icon}
+            size={21}
+            color={
+              (active === 'Shop' && label === 'Shop') || (active === 'Orders' && label === 'Orders')
+                ? colors.green
+                : colors.muted
+            }
+          />
+          <Text style={styles.shopBottomLabel}>{label}</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
 
 export function BrandStoryScreen() {
   return (
-    <Screen style={styles.brandScreen}>
+    <Screen>
       <FeatureHeader title="Logo Breakdown" />
-      <View style={styles.brandEquation}>
-        <View style={styles.peopleMark}>
-          <Image source={images.teachers[0]} style={styles.brandPerson} />
-          <Image source={images.teachers[1]} style={[styles.brandPerson, styles.brandPersonMiddle]} />
-          <Image source={images.teachers[2]} style={[styles.brandPerson, styles.brandPersonLast]} />
-        </View>
-        <Text style={styles.brandPlus}>+</Text>
-        <View style={styles.sunMark} />
-        <Text style={styles.brandPlus}>+</Text>
-        <Ionicons name="sparkles" size={42} color={colors.blue} />
-        <Text style={styles.brandEquals}>=</Text>
-        <Image source={images.favicon} style={styles.brandLogoMark} resizeMode="contain" />
+      <View style={styles.brandMarks}>
+        <Ionicons name="people-circle" size={74} color={colors.orange} />
+        <Text style={styles.plus}>+</Text>
+        <Ionicons name="sparkles" size={74} color={colors.green2} />
       </View>
-      <View style={styles.brandStoryCard}>
-        <View style={styles.brandStoryTop}>
-          <Text style={styles.brandStoryText}>
-            This process shows how the Mobsie Connect logo was built from a human idea rather than just abstract shapes.{`\n\n`}
-            The people holding hands represent the three core pillars of the platform:
-          </Text>
-          {['Children', 'Parents', 'Educators'].map((item) => (
-            <View key={item} style={styles.brandPillar}>
-              <Ionicons name="chevron-forward" size={16} color="#fff" />
-              <Text style={styles.brandPillarText}>{item}</Text>
-            </View>
-          ))}
-        </View>
-        <View style={styles.brandStoryBottom}>
-          <Text style={styles.brandStoryBottomText}>
-            When connected together, they naturally create the star shape in the centre, symbolising growth, guidance, imagination, and brighter futures through connected learning.{`\n\n`}
-            <Text style={styles.brandStoryStrong}>The final logo becomes a simplified symbol of:</Text>{`\n`}people + connection + growth + education.
-          </Text>
-        </View>
-      </View>
+      <Card style={{ backgroundColor: colors.mint }}>
+        <Text style={styles.body}>
+          This process shows how the Mobsie Connect logo was built from human connection and
+          educational growth. The playful building-block shapes reflect children, care and the
+          imagination behind their future.
+        </Text>
+      </Card>
+      <Card style={{ marginTop: 14, backgroundColor: '#FFF4E5' }}>
+        <Text style={styles.body}>
+          When connected together, the elements represent the organisation, its centres and the
+          families it serves—working together to learn, grow and thrive.
+        </Text>
+      </Card>
     </Screen>
   );
 }
@@ -1289,13 +1638,22 @@ const styles = StyleSheet.create({
   dot: { borderRadius: 6, height: 12, marginHorizontal: 8, width: 12 },
   activityCard: {
     alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderLeftWidth: 4,
     flex: 1,
     flexDirection: 'row',
     gap: 10,
     minHeight: 65,
   },
-  currentActivity: { borderColor: colors.blue, borderWidth: 2 },
-  classLabel: { color: colors.blue, fontFamily: 'Poppins_600SemiBold', fontSize: 8, marginTop: 2 },
+  androidActivityCard: {
+    borderColor: '#E4EEE8',
+    borderLeftWidth: 4,
+    elevation: 1,
+    shadowOpacity: 0.04,
+    shadowRadius: 4,
+  },
+  currentActivity: { borderColor: colors.green, borderWidth: 2, borderLeftWidth: 4 },
+  classLabel: { color: colors.green, fontFamily: 'Poppins_600SemiBold', fontSize: 8, marginTop: 2 },
   liveClassBanner: {
     alignItems: 'center',
     backgroundColor: '#E9F4FF',
@@ -1405,6 +1763,20 @@ const styles = StyleSheet.create({
     padding: 14,
   },
   editorClause: { color: colors.text, fontSize: 10, lineHeight: 15 },
+  viewerDetails: { gap: 12, marginTop: 4 },
+  viewerDetail: { borderBottomColor: colors.line, borderBottomWidth: 1, paddingBottom: 9 },
+  viewerDetailValue: { color: colors.ink, fontSize: 12, lineHeight: 19 },
+  viewerSignature: { color: colors.green, fontSize: 18, fontStyle: 'italic' },
+  viewerNotice: {
+    alignItems: 'flex-start',
+    backgroundColor: '#FFF7EA',
+    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 9,
+    marginTop: 4,
+    padding: 12,
+  },
+  viewerNoticeText: { color: colors.text, flex: 1, fontSize: 10, lineHeight: 16 },
   editorField: { marginBottom: 13 },
   editorLabel: {
     color: colors.ink,
@@ -1447,7 +1819,53 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   ratingRow: { flexDirection: 'row', justifyContent: 'center' },
-  newsletterScreen: { paddingBottom: 0 },
+  feedbackHistoryHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    marginTop: 20,
+  },
+  feedbackCountBadge: {
+    alignItems: 'center',
+    backgroundColor: '#E5F2EC',
+    borderRadius: 12,
+    justifyContent: 'center',
+    marginLeft: 8,
+    minWidth: 24,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  feedbackCountText: {
+    color: colors.green,
+    fontFamily: 'Poppins_700Bold',
+    fontSize: 9,
+  },
+  feedbackCardHeading: { alignItems: 'center', flexDirection: 'row', gap: 8 },
+  feedbackStatus: {
+    backgroundColor: '#F1F4F3',
+    borderRadius: 10,
+    color: colors.green,
+    fontFamily: 'Poppins_600SemiBold',
+    fontSize: 7,
+    overflow: 'hidden',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    textTransform: 'capitalize',
+  },
+  feedbackMeta: { color: '#8B9290', fontSize: 8, marginTop: 7 },
+  feedbackReply: {
+    backgroundColor: '#EDF8F3',
+    borderColor: '#CBE8DB',
+    borderLeftWidth: 3,
+    borderRadius: 12,
+    marginTop: 12,
+    padding: 12,
+  },
+  feedbackReplyHeading: { alignItems: 'center', flexDirection: 'row', gap: 6 },
+  feedbackReplyTitle: { color: colors.green, fontFamily: 'Poppins_700Bold', fontSize: 10 },
+  feedbackReplyBody: { color: '#35534B', fontSize: 11, lineHeight: 18, marginTop: 6 },
+  feedbackReplyMeta: { color: '#81918C', fontSize: 8, marginTop: 7 },
+  feedbackEmpty: { alignItems: 'center', gap: 8, padding: 28 },
+  newsletterScreen: { backgroundColor: '#F3F0F7', paddingBottom: 28 },
   newsletterListScreen: { paddingHorizontal: 15, paddingBottom: 28 },
   newsletterHero: {
     backgroundColor: '#174F49',
@@ -1561,6 +1979,144 @@ const styles = StyleSheet.create({
     width: 40,
   },
   newsletterReaderLabel: { color: colors.ink, fontFamily: 'Poppins_700Bold', fontSize: 15 },
+  newsletterEmail: {
+    backgroundColor: '#fff',
+    borderRadius: 22,
+    elevation: 4,
+    overflow: 'hidden',
+    shadowColor: '#25163B',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.12,
+    shadowRadius: 18,
+  },
+  newsletterEmailHeader: {
+    alignItems: 'center',
+    backgroundColor: '#D9D9D9',
+    justifyContent: 'center',
+    minHeight: 72,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+  },
+  newsletterEmailLogo: {
+    height: 52,
+    width: 150,
+  },
+  newsletterEmailHero: { minHeight: 175, width: '100%' },
+  newsletterEmailHeroImage: { resizeMode: 'cover' },
+  newsletterEmailHeroOverlay: {
+    backgroundColor: 'rgba(79, 38, 133, 0.55)',
+    flex: 1,
+    justifyContent: 'flex-end',
+    minHeight: 175,
+    padding: 23,
+  },
+  newsletterEmailHeroFallback: {
+    backgroundColor: colors.orange,
+    minHeight: 175,
+    padding: 23,
+    justifyContent: 'flex-end',
+  },
+  newsletterEmailHeroTitle: {
+    color: '#fff',
+    fontFamily: 'Poppins_700Bold',
+    fontSize: 25,
+    lineHeight: 31,
+  },
+  newsletterEmailHeroMeta: {
+    color: '#FFF4E8',
+    fontFamily: 'Poppins_600SemiBold',
+    fontSize: 8,
+    marginTop: 8,
+    textTransform: 'uppercase',
+  },
+  newsletterEmailBody: { padding: 23 },
+  newsletterEmailEyebrow: {
+    color: '#6F3CC3',
+    fontFamily: 'Poppins_700Bold',
+    fontSize: 9,
+    letterSpacing: 1.6,
+  },
+  newsletterEmailTitle: {
+    color: colors.ink,
+    fontFamily: 'Poppins_700Bold',
+    fontSize: 21,
+    lineHeight: 27,
+    marginTop: 8,
+  },
+  newsletterEmailCopy: {
+    color: '#45404B',
+    fontSize: 10,
+    lineHeight: 17,
+    marginTop: 13,
+  },
+  newsletterEmailFeatureImage: {
+    borderRadius: 16,
+    height: 190,
+    marginTop: 20,
+    width: '100%',
+  },
+  newsletterEmailFeatureFallback: {
+    alignItems: 'center',
+    backgroundColor: '#F0EAF8',
+    borderRadius: 16,
+    height: 160,
+    justifyContent: 'center',
+    marginTop: 20,
+    width: '100%',
+  },
+  newsletterEmailFeatureFallbackText: {
+    color: '#6F3CC3',
+    fontFamily: 'Poppins_600SemiBold',
+    fontSize: 10,
+    marginTop: 8,
+  },
+  newsletterEmailCta: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: colors.orange,
+    borderRadius: 9,
+    marginTop: 20,
+    minWidth: 132,
+    paddingHorizontal: 19,
+    paddingVertical: 12,
+  },
+  newsletterEmailCtaText: {
+    color: '#fff',
+    fontFamily: 'Poppins_700Bold',
+    fontSize: 10,
+  },
+  newsletterEmailFooter: {
+    alignItems: 'center',
+    backgroundColor: '#F2ECF9',
+    paddingHorizontal: 23,
+    paddingVertical: 23,
+  },
+  newsletterEmailFooterImage: { minHeight: 96, width: '100%' },
+  newsletterEmailFooterBackground: { resizeMode: 'cover' },
+  newsletterEmailFooterOverlay: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.68)',
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 96,
+    paddingHorizontal: 23,
+    paddingVertical: 23,
+  },
+  newsletterEmailFooterTextOnImage: { color: '#fff' },
+  newsletterEmailFooterText: {
+    color: '#38294D',
+    fontFamily: 'Poppins_600SemiBold',
+    fontSize: 9,
+    lineHeight: 14,
+    textAlign: 'center',
+  },
+  newsletterEmailFooterMeta: {
+    color: '#82758E',
+    fontSize: 7,
+    lineHeight: 11,
+    marginTop: 9,
+    textAlign: 'center',
+  },
   newsletterReaderCover: { borderRadius: 22, height: 190, marginBottom: 22, width: '100%' },
   newsletterMetaRow: {
     flexDirection: 'row',
@@ -1749,16 +2305,51 @@ const styles = StyleSheet.create({
   productCard: { width: '48%' },
   productArt: {
     alignItems: 'center',
+    aspectRatio: 1,
     borderRadius: radius.md,
-    height: 90,
     justifyContent: 'center',
     marginBottom: 8,
+    overflow: 'hidden',
+    width: '100%',
   },
-  productImage: { height: 88, width: '100%' },
+  productImage: { height: '100%', width: '100%' },
+  productColorOptions: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 8 },
+  productColorOption: {
+    borderColor: colors.line,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+  },
+  productColorOptionSelected: { backgroundColor: colors.green, borderColor: colors.green },
+  productColorText: { color: colors.text, fontSize: 8 },
+  productColorTextSelected: { color: '#FFF', fontFamily: 'Poppins_600SemiBold' },
   cartImage: { height: 38, width: 38 },
   price: { color: colors.ink, fontSize: 12, fontWeight: '900', marginTop: 4 },
   quantity: { color: colors.orange, fontSize: 12, fontWeight: '900' },
   quantityControls: { alignItems: 'center', flexDirection: 'row', gap: 12 },
+  orderCard: { marginBottom: 10, padding: 14 },
+  orderHeader: { alignItems: 'center', flexDirection: 'row', gap: 10 },
+  orderIcon: {
+    alignItems: 'center',
+    backgroundColor: colors.mint,
+    borderRadius: radius.md,
+    height: 44,
+    justifyContent: 'center',
+    width: 44,
+  },
+  orderTotal: { color: colors.ink, fontFamily: 'Poppins_700Bold', fontSize: 12 },
+  orderItems: { borderTopColor: colors.line, borderTopWidth: 1, marginTop: 12, paddingTop: 8 },
+  orderItemRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  orderItemImage: { borderRadius: 8, height: 44, width: 44 },
+  orderItemName: { color: colors.text, flex: 1, fontSize: 11 },
+  orderCollection: { alignItems: 'center', flexDirection: 'row', gap: 5, marginTop: 8 },
   cartCount: {
     backgroundColor: colors.orange,
     borderRadius: 8,
@@ -1775,37 +2366,18 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: 7,
   },
-  brandScreen: { paddingBottom: 30 },
-  brandEquation: {
+  brandMarks: {
     alignItems: 'center',
-    backgroundColor: '#F1F0EE',
-    borderRadius: radius.lg,
     flexDirection: 'row',
     justifyContent: 'center',
-    marginHorizontal: 8,
-    marginTop: 14,
-    minHeight: 112,
-    paddingHorizontal: 10,
+    marginVertical: 35,
   },
-  peopleMark: { height: 58, position: 'relative', width: 62 },
-  brandPerson: {
-    borderColor: '#fff', borderRadius: 24, borderWidth: 2, height: 42,
-    left: 0, position: 'absolute', top: 8, width: 42,
+  plus: {
+    color: colors.muted,
+    fontSize: 28,
+    fontWeight: '300',
+    marginHorizontal: 18,
   },
-  brandPersonMiddle: { left: 13, top: 0 },
-  brandPersonLast: { left: 23, top: 16 },
-  brandPlus: { color: colors.green2, fontSize: 22, fontWeight: '900', marginHorizontal: 6 },
-  brandEquals: { color: colors.green2, fontSize: 22, fontWeight: '900', marginHorizontal: 5 },
-  sunMark: { backgroundColor: colors.amber, borderRadius: 24, height: 48, width: 48 },
-  brandLogoMark: { height: 48, width: 48 },
-  brandStoryCard: { borderRadius: radius.lg, marginHorizontal: 8, marginTop: 14, overflow: 'hidden' },
-  brandStoryTop: { backgroundColor: '#56AE69', padding: 22 },
-  brandStoryText: { color: '#fff', fontSize: 15, lineHeight: 21 },
-  brandPillar: { alignItems: 'center', flexDirection: 'row', marginTop: 5 },
-  brandPillarText: { color: '#fff', fontSize: 15, fontWeight: '800', marginLeft: 5 },
-  brandStoryBottom: { backgroundColor: '#FFF1D2', padding: 22 },
-  brandStoryBottomText: { color: '#443A30', fontSize: 15, lineHeight: 21 },
-  brandStoryStrong: { fontWeight: '900' },
   statusDot: { borderRadius: 7, height: 14, width: 14 },
   shopBottomNav: {
     alignItems: 'center',

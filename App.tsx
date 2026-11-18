@@ -16,6 +16,7 @@ import { ApplicationProvider } from './src/application/ApplicationContext';
 import { SchoolDataProvider } from './src/data/SchoolContext';
 import { AppNavigator } from './src/navigation/AppNavigator';
 import { PushRegistration } from './src/notifications/PushRegistration';
+import { ConsentFormsReminder } from './src/notifications/ConsentFormsReminder';
 import { colors } from './src/theme';
 
 const TextWithDefaults = Text as typeof Text & { defaultProps?: { style?: unknown } };
@@ -48,6 +49,7 @@ export default function App() {
         <ApplicationProvider>
           <SchoolDataProvider>
             <StatusBar style="dark" />
+            <ConsentFormsReminder />
             <AppNavigator />
           </SchoolDataProvider>
         </ApplicationProvider>

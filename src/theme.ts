@@ -10,7 +10,7 @@ export const colors = {
   paper: '#FFFFFF',
   ink: '#143A38',
   text: '#363A39',
-  muted: '#737B79',
+  muted: '#111111',
   line: '#E7E4DC',
   danger: '#E64D47',
 };

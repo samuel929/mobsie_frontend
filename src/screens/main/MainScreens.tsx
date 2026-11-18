@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -13,6 +13,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -23,9 +24,17 @@ import { Branch, TeamMember, useApplication } from '../../application/Applicatio
 import { images } from '../../assets';
 import { AppHeader } from '../../components/AppChrome';
 import { Avatar, Button, Card, Field, Screen, SectionTitle } from '../../components/ui';
-import { colors, radius } from '../../theme';
+import { colors, radius, shadow } from '../../theme';
 import { useAuth } from '../../auth/AuthContext';
 import { useSchoolData } from '../../data/SchoolContext';
+import { formatZar, publicFeeStructure } from '../../data/schoolPackages';
+import {
+  cancelCalendarReminder,
+  getEnabledCalendarReminderIds,
+  scheduleCalendarReminder,
+} from '../../notifications/calendarReminders';
+import { displayReference } from '../../utils/reference';
+import { personNameCase, sentenceCase } from '../../utils/text';
 
 function parseApiDate(value: unknown): Date | null {
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
@@ -90,7 +99,7 @@ async function openBranchDirections(branch: Branch) {
 export function HomeScreen() {
   const navigation = useNavigation<any>();
   const { user } = useAuth();
-  const { students, academics, homework, loading, refresh } = useSchoolData();
+  const { students, academics, loading, refresh, activeChild } = useSchoolData();
   const student = students[0];
   const records = academics.filter((record) => record.studentId === student?.id);
   const average = records.length
@@ -100,7 +109,16 @@ export function HomeScreen() {
     <Screen onRefresh={refresh}>
       <AppHeader />
       <Text style={styles.greeting}>Hello, {user?.name?.split(' ')[0] ?? 'Parent'}!</Text>
-      <ChildCard student={student} parentName={user?.name} />
+      <Text style={styles.homeDate}>
+        {new Date().toLocaleDateString('en-ZA', {
+          weekday: 'long',
+          day: 'numeric',
+          month: 'long',
+          year: 'numeric',
+        })}
+      </Text>
+      <ChildAccountSwitcher />
+      <ChildCard student={student} profile={activeChild} parentName={user?.name} />
       {loading && <ActivityIndicator color={colors.green} />}
       <View style={styles.quickGrid}>
         {(
@@ -140,28 +158,11 @@ export function HomeScreen() {
           <Text style={styles.more}>Show more</Text>
         </View>
       </Card>
-      <SectionTitle title="Homework Updates" />
-      <Card>
-        {(homework.length
-          ? homework.slice(0, 5).map((item: any) => item.title || item.name || 'Homework update')
-          : ['No homework has been added']
-        ).map((item, index) => (
-          <View key={item} style={styles.listRow}>
-            <Ionicons
-              name="document-lock-outline"
-              size={20}
-              color={index ? colors.purple : colors.orange}
-            />
-            <Text style={styles.listText}>{item}</Text>
-            <Ionicons name="chevron-forward" color={colors.muted} />
-          </View>
-        ))}
-      </Card>
     </Screen>
   );
 }
 
-export function CalendarScreen() {
+export function CalendarScreen({ route }: { route?: { params?: { eventId?: string } } }) {
   const { events, loading, refresh } = useSchoolData();
   const calendarEvents = useMemo(
     () =>
@@ -172,15 +173,43 @@ export function CalendarScreen() {
     [events],
   );
   const [visibleMonth, setVisibleMonth] = useState(() => {
-    const initial = calendarEvents.find((item) => item.startsOn)?.startsOn ?? new Date();
-    return new Date(initial.getFullYear(), initial.getMonth(), 1);
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
   });
-  const featured = calendarEvents[0];
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(
+    route?.params?.eventId ?? null,
+  );
+  const [reminderEventIds, setReminderEventIds] = useState<Set<string>>(new Set());
+  const [reminderBusy, setReminderBusy] = useState(false);
+  const reminderStateVersion = useRef(0);
+  const featured =
+    calendarEvents.find((item) => item.event.id === selectedEventId) ??
+    calendarEvents.find((item) => {
+      const date = item.startsOn;
+      return (
+        date &&
+        date.getFullYear() === visibleMonth.getFullYear() &&
+        date.getMonth() === visibleMonth.getMonth()
+      );
+    });
+
   useEffect(() => {
-    const featuredDate = calendarEvents.find((item) => item.startsOn)?.startsOn;
-    if (!featuredDate) return;
-    setVisibleMonth(new Date(featuredDate.getFullYear(), featuredDate.getMonth(), 1));
-  }, [events]);
+    const requestedVersion = reminderStateVersion.current;
+    void getEnabledCalendarReminderIds().then((ids) => {
+      // Do not let the initial storage read overwrite a toggle that the user
+      // changed while the calendar was still loading.
+      if (reminderStateVersion.current === requestedVersion) setReminderEventIds(ids);
+    });
+  }, []);
+
+  useEffect(() => {
+    const requestedEvent = calendarEvents.find((item) => item.event.id === route?.params?.eventId);
+    if (!requestedEvent?.startsOn) return;
+    setSelectedEventId(requestedEvent.event.id);
+    setVisibleMonth(
+      new Date(requestedEvent.startsOn.getFullYear(), requestedEvent.startsOn.getMonth(), 1),
+    );
+  }, [calendarEvents, route?.params?.eventId]);
   const year = visibleMonth.getFullYear();
   const month = visibleMonth.getMonth();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
@@ -199,12 +228,78 @@ export function CalendarScreen() {
     [calendarEvents, month, year],
   );
 
+  const eventsForDay = (day: number) =>
+    calendarEvents.filter(
+      (item) =>
+        item.startsOn?.getFullYear() === year &&
+        item.startsOn.getMonth() === month &&
+        item.startsOn.getDate() === day,
+    );
+
+  const selectEvent = (eventId: string, startsOn: Date | null) => {
+    setSelectedEventId(eventId);
+    if (startsOn) {
+      setVisibleMonth(new Date(startsOn.getFullYear(), startsOn.getMonth(), 1));
+    }
+  };
+
+  const toggleReminder = async (enabled: boolean) => {
+    if (!featured?.startsOn || reminderBusy) return;
+    const eventId = featured.event.id;
+    reminderStateVersion.current += 1;
+
+    // Reflect the user's action immediately. If the operating system refuses
+    // the notification, the catch block restores the previous state.
+    setReminderEventIds((current) => {
+      const next = new Set(current);
+      if (enabled) next.add(eventId);
+      else next.delete(eventId);
+      return next;
+    });
+    setReminderBusy(true);
+    try {
+      if (enabled) {
+        const scheduledFor = await scheduleCalendarReminder({
+          id: eventId,
+          title: featured.event.title,
+          startsAt: featured.startsOn,
+          branchName: featured.event.branchName,
+        });
+        Alert.alert(
+          'Reminder set',
+          `You will be reminded on ${scheduledFor.toLocaleString('en-ZA')}.`,
+        );
+      } else {
+        await cancelCalendarReminder(eventId);
+      }
+    } catch (error) {
+      setReminderEventIds((current) => {
+        const next = new Set(current);
+        if (enabled) next.delete(eventId);
+        else next.add(eventId);
+        return next;
+      });
+      Alert.alert(
+        'Reminder unavailable',
+        error instanceof Error ? error.message : 'Unable to update the reminder. Please try again.',
+      );
+    } finally {
+      setReminderBusy(false);
+    }
+  };
+
   const changeMonth = (offset: number) => {
+    setSelectedEventId(null);
     setVisibleMonth((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1));
   };
 
   return (
-    <Screen onRefresh={refresh}>
+    <Screen
+      onRefresh={async () => {
+        await refresh();
+        setReminderEventIds(await getEnabledCalendarReminderIds());
+      }}
+    >
       <AppHeader title="Calendar" />
       {loading && <ActivityIndicator color={colors.green} />}
       <Card style={styles.calendarCard}>
@@ -230,22 +325,33 @@ export function CalendarScreen() {
           ))}
           {Array.from({ length: daysInMonth }, (_, index) => index + 1).map((day) => {
             const hasEvent = eventDays.has(day);
-            const isFeatured =
+            const isSelected =
               featured?.startsOn?.getFullYear() === year &&
               featured.startsOn.getMonth() === month &&
               featured.startsOn.getDate() === day;
             return (
-              <View key={day} style={styles.date}>
+              <Pressable
+                key={day}
+                style={styles.date}
+                disabled={!hasEvent}
+                accessibilityRole={hasEvent ? 'button' : undefined}
+                accessibilityLabel={hasEvent ? `Select event on ${day}` : undefined}
+                onPress={() => {
+                  const eventOnDay = eventsForDay(day)[0];
+                  if (eventOnDay) selectEvent(eventOnDay.event.id, eventOnDay.startsOn);
+                }}
+              >
                 <View
                   style={[
                     styles.dateBadge,
-                    hasEvent && (isFeatured ? styles.orangeDate : styles.greenDate),
+                    hasEvent && styles.greenDate,
+                    isSelected && styles.selectedDate,
                   ]}
                 >
                   <Text style={[styles.calendarDateText, hasEvent && styles.white]}>{day}</Text>
-                  {isFeatured && <Ionicons name="notifications-outline" size={8} color="#fff" />}
+                  {isSelected && <Ionicons name="notifications-outline" size={8} color="#fff" />}
                 </View>
-              </View>
+              </Pressable>
             );
           })}
         </View>
@@ -273,34 +379,59 @@ export function CalendarScreen() {
             </Text>
           )}
           <View style={styles.reminderRow}>
-            <View style={styles.reminderSwitch}>
-              <View style={styles.reminderKnob} />
-            </View>
-            <Text style={styles.reminderText}>1 Day Before</Text>
+            <Switch
+              value={reminderEventIds.has(featured.event.id)}
+              onValueChange={(enabled) => void toggleReminder(enabled)}
+              disabled={reminderBusy}
+              trackColor={{ false: 'rgba(255,255,255,0.38)', true: '#706AF2' }}
+              thumbColor="#fff"
+              ios_backgroundColor="rgba(255,255,255,0.38)"
+              accessibilityLabel={`Remind me one day before ${featured.event.title}`}
+            />
+            <Pressable
+              hitSlop={10}
+              disabled={reminderBusy}
+              onPress={() => void toggleReminder(!reminderEventIds.has(featured.event.id))}
+            >
+              <Text style={styles.reminderText}>
+                {reminderBusy
+                  ? 'Updating…'
+                  : reminderEventIds.has(featured.event.id)
+                    ? '1 Day Before · On'
+                    : '1 Day Before · Off'}
+              </Text>
+            </Pressable>
           </View>
         </Card>
       )}
 
       <SectionTitle title="Events" />
       {calendarEvents.map(({ event, startsOn }, index) => (
-        <Card key={event.id} style={styles.listRow}>
-          <View style={[styles.upcomingIcon, index % 2 === 1 && styles.upcomingIconPurple]}>
-            <Ionicons
-              name="document-text-outline"
-              size={18}
-              color={index % 2 === 1 ? colors.purple : colors.orange}
-            />
-          </View>
-          <View style={styles.flex}>
-            <Text style={styles.cardTitle}>{event.title}</Text>
-            <Text style={styles.body}>
-              {startsOn?.toLocaleString() ?? 'Date unavailable'}
-              {' · '}
-              {event.branchName || 'All branches'}
-            </Text>
-          </View>
-          <Ionicons name="chevron-forward" color={colors.muted} />
-        </Card>
+        <Pressable
+          key={event.id}
+          onPress={() => selectEvent(event.id, startsOn)}
+          accessibilityRole="button"
+          accessibilityLabel={`View ${event.title}`}
+        >
+          <Card style={[styles.listRow, selectedEventId === event.id && styles.selectedEventRow]}>
+            <View style={[styles.upcomingIcon, index % 2 === 1 && styles.upcomingIconPurple]}>
+              <Ionicons
+                name="document-text-outline"
+                size={18}
+                color={index % 2 === 1 ? colors.purple : colors.orange}
+              />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>{event.title}</Text>
+              <Text style={styles.body}>
+                {startsOn?.toLocaleString() ?? 'Date unavailable'}
+                {' · '}
+                {event.branchName || 'All branches'}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" color={colors.muted} />
+          </Card>
+        </Pressable>
       ))}
       {!loading && !calendarEvents.length && (
         <Card>
@@ -312,11 +443,35 @@ export function CalendarScreen() {
 }
 
 export function MessagesScreen() {
-  const { messages, sendMessage, refresh, loading } = useSchoolData();
+  const { messages, sendMessage, refreshMessages, loading } = useSchoolData();
   const { user } = useAuth();
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const messageListRef = useRef<FlatList>(null);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      let active = true;
+      let syncing = false;
+      const sync = async () => {
+        if (!active || syncing) return;
+        syncing = true;
+        try {
+          await refreshMessages(true);
+        } catch {
+          // Keep the conversation available and retry on the next short interval.
+        } finally {
+          syncing = false;
+        }
+      };
+      void sync();
+      const interval = setInterval(() => void sync(), 3_000);
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    }, [refreshMessages]),
+  );
 
   // The API returns the most recent messages first. Render them oldest-to-newest
   // so the conversation reads naturally from the top down and ends at the composer.
@@ -381,7 +536,7 @@ export function MessagesScreen() {
           keyboardShouldPersistTaps="handled"
           refreshing={loading}
           onRefresh={() => {
-            void refresh();
+            void refreshMessages(true);
           }}
           renderItem={({ item: message }) => {
             const isParent = message.senderType === 'PARENT' || message.senderName === user?.name;
@@ -457,15 +612,38 @@ export function MessagesScreen() {
 export function ProfileScreen() {
   const navigation = useNavigation<any>();
   const { user, logout, updateProfile } = useAuth();
-  const { students, applications, orders, refresh } = useSchoolData();
+  const { refresh, applications, students } = useSchoolData();
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [name, setName] = useState(user?.name ?? '');
   const [email, setEmail] = useState(user?.email ?? '');
   const [phone, setPhone] = useState(user?.phone ?? '');
-  const branchReferences = Array.from(
-    new Map(students.filter((student) => student.branchName).map((student) => [student.branchId, student.branchName])).values(),
-  );
+  const childReferences = useMemo(() => {
+    const seen = new Set<string>();
+    const issued = applications
+      .filter((application) => application.reference?.trim())
+      .filter((application) => {
+        const reference = application.reference.trim().toUpperCase();
+        if (seen.has(reference)) return false;
+        seen.add(reference);
+        return true;
+      })
+      .map((application) => ({
+        childName: application.childName || students[0]?.name || user?.child || 'Child',
+        reference: application.reference,
+      }));
+
+    if (issued.length) return issued;
+    if (user?.applicationReference?.trim()) {
+      return [
+        {
+          childName: user.child || students[0]?.name || 'Child',
+          reference: user.applicationReference,
+        },
+      ];
+    }
+    return [];
+  }, [applications, students, user?.applicationReference, user?.child]);
 
   const openPersonalInformation = () => {
     setName(user?.name ?? '');
@@ -506,19 +684,33 @@ export function ProfileScreen() {
         <Avatar name={user?.name ?? 'Parent'} size={82} />
         <Text style={styles.greeting}>{user?.name ?? 'Parent'}</Text>
         <Text style={styles.body}>{user?.email ?? ''} · Parent</Text>
-        {branchReferences.length > 0 ? (
-          <View style={styles.profileBranchList}>
-            {branchReferences.map((branchName) => (
-              <View key={branchName} style={styles.profileBranchChip}>
-                <Ionicons name="business-outline" size={13} color={colors.green} />
-                <Text style={styles.profileBranchText}>{branchName}</Text>
-              </View>
-            ))}
-          </View>
-        ) : (
-          <Text style={styles.profileBranchEmpty}>No branch assigned yet</Text>
-        )}
       </View>
+      <ChildAccountSwitcher />
+      <Card style={styles.profileReferenceCard}>
+        <View style={styles.profileReferenceHeader}>
+          <View style={[styles.profileRowIcon, { backgroundColor: '#FFF0DE' }]}>
+            <Ionicons name="document-text-outline" size={19} color={colors.orange} />
+          </View>
+          <View style={styles.flex}>
+            <Text style={styles.profileReferenceTitle}>Child Reference</Text>
+            <Text style={styles.body}>Use this reference for school forms and payments.</Text>
+          </View>
+        </View>
+        {childReferences.length ? (
+          childReferences.map((item) => (
+            <View key={item.reference} style={styles.profileReferenceRow}>
+              <Text style={styles.profileReferenceChild}>{item.childName}</Text>
+              <Text selectable style={styles.profileReferenceValue}>
+                {displayReference(item.reference)}
+              </Text>
+            </View>
+          ))
+        ) : (
+          <Text style={styles.profileReferencePending}>
+            A reference will appear here once the child&apos;s application has been created.
+          </Text>
+        )}
+      </Card>
       <Pressable
         onPress={openPersonalInformation}
         accessibilityRole="button"
@@ -532,7 +724,6 @@ export function ProfileScreen() {
           <Ionicons name="chevron-forward" color={colors.muted} />
         </Card>
       </Pressable>
-
       {editing && (
         <Card style={styles.personalForm}>
           <Text style={styles.greetingSmall}>Edit Personal Information</Text>
@@ -569,17 +760,6 @@ export function ProfileScreen() {
         </Card>
       )}
 
-      {[
-        `${students.length} enrolled child${students.length === 1 ? '' : 'ren'}`,
-        `${applications.length} application${applications.length === 1 ? '' : 's'}`,
-        `${orders.length} shop order${orders.length === 1 ? '' : 's'}`,
-        'Notification Settings',
-      ].map((item) => (
-        <Card key={item} style={styles.listRow}>
-          <Text style={styles.listText}>{item}</Text>
-          <Ionicons name="chevron-forward" color={colors.muted} />
-        </Card>
-      ))}
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Open learner deregistration"
@@ -665,15 +845,7 @@ export function TeamScreen() {
           <View style={styles.flex}>
             <Text style={styles.cardTitle}>{member.name}</Text>
             <Text style={styles.body}>{member.title}</Text>
-            <Text style={styles.experience}>Experience　{member.yearsExperience} years</Text>
           </View>
-          {member.isPrincipal && (
-            <Pressable
-              onPress={() => member.contactPhone && Linking.openURL(`tel:${member.contactPhone}`)}
-            >
-              <Ionicons name="call-outline" color={colors.green} />
-            </Pressable>
-          )}
         </Card>
       ))}
     </Screen>
@@ -681,163 +853,124 @@ export function TeamScreen() {
 }
 
 export function LearningScreen() {
-  const { user } = useAuth();
-  const { students, refresh, loading } = useSchoolData();
-  const student = students[0];
-  const childFirstName = student?.name?.trim().split(/\s+/)[0] || 'Learner';
-  const lessons = [
-    {
-      id: 'alphabet',
-      title: 'Alphabet A–Z',
-      completed: 12,
-      total: 26,
-      color: colors.green2,
-      image: images.learning.alphabet,
-      url: 'https://learn.khanacademy.org/khan-academy-kids/',
-    },
-    {
-      id: 'numbers',
-      title: 'Numbers 1–10',
-      completed: 8,
-      total: 10,
-      color: colors.orange,
-      image: images.learning.numbers,
-      url: 'https://www.topmarks.co.uk/maths-games/3-5-years/counting',
-    },
-    {
-      id: 'literacy',
-      title: 'Literacy',
-      completed: 4,
-      total: 10,
-      color: '#EF6683',
-      image: images.learning.literacy,
-      url: 'https://learn.khanacademy.org/khan-academy-kids/',
-    },
-    {
-      id: 'art',
-      title: 'Draw & Create',
-      completed: 5,
-      total: 8,
-      color: colors.amber,
-      image: images.learning.art,
-      url: 'https://www.tate.org.uk/kids/games-quizzes',
-    },
-    {
-      id: 'story',
-      title: 'Story Time',
-      completed: 3,
-      total: 5,
-      color: colors.purple,
-      image: images.learning.story,
-      url: 'https://storylineonline.net/',
-    },
-  ] as const;
-  const [progress, setProgress] = useState<Record<string, number>>({});
-  const [selectedId, setSelectedId] = useState('alphabet');
-  useEffect(() => {
-    AsyncStorage.getItem('mobsie-learning-progress')
-      .then((saved) => saved && setProgress(JSON.parse(saved)))
-      .catch(() => undefined);
-  }, []);
-  const openLesson = async (lesson: (typeof lessons)[number]) => {
-    setSelectedId(lesson.id);
-    try {
-      await Linking.openURL(lesson.url);
-      const current = progress[lesson.id] ?? lesson.completed;
-      const next = { ...progress, [lesson.id]: Math.min(lesson.total, current + 1) };
-      setProgress(next);
-      await AsyncStorage.setItem('mobsie-learning-progress', JSON.stringify(next));
-    } catch {
-      Alert.alert('Unable to open lesson', 'Check the device internet connection and try again.');
-    }
-  };
-  const selected =
-    lessons.find((lesson) => lesson.id === selectedId) ??
-    [...lessons].sort(
-      (a, b) =>
-        (progress[a.id] ?? a.completed) / a.total - (progress[b.id] ?? b.completed) / b.total,
-    )[0];
+  const { refresh } = useSchoolData();
   return (
     <Screen onRefresh={refresh}>
-      <AppHeader />
-      <Text style={styles.greeting}>Hello, {childFirstName}!</Text>
-      <ChildCard student={student} parentName={user?.name || 'Parent'} />
-      {loading && <ActivityIndicator color={colors.green} />}
-      <SectionTitle title="Learning Subjects" />
-      <View style={styles.lessonGrid}>
-        {lessons.map((lesson) => {
-          const completed = progress[lesson.id] ?? lesson.completed;
-          const percentage = Math.round((completed / lesson.total) * 100);
-          return (
-            <Pressable
-              key={lesson.id}
-              accessibilityRole="button"
-              accessibilityLabel={`Open ${lesson.title} lesson, ${percentage}% complete`}
-              onPress={() => openLesson(lesson)}
-              style={[
-                styles.lesson,
-                { backgroundColor: lesson.color },
-                selectedId === lesson.id && styles.selectedLesson,
-              ]}
-            >
-              <Text style={styles.lessonTitle}>{lesson.title}</Text>
-              <Image source={lesson.image} style={styles.lessonImage} resizeMode="contain" />
-              <Text style={styles.lessonProgress}>
-                {completed}/{lesson.total} · {percentage}%
-              </Text>
-              <View style={styles.lessonTrack}>
-                <View style={[styles.lessonFill, { width: `${percentage}%` }]} />
-              </View>
-            </Pressable>
-          );
-        })}
-        <View style={[styles.lesson, { backgroundColor: '#91928F' }]}>
-          <Text style={styles.lessonTitle}>More{`\n`}Coming Soon</Text>
-          <Ionicons name="lock-closed-outline" size={38} color="#fff" />
-          <Text style={styles.lessonProgress}>Stay tuned!</Text>
+      <AppHeader title="Learning" />
+      <View style={styles.learningComingSoon}>
+        <View style={styles.learningComingSoonIcon}>
+          <Ionicons name="sparkles-outline" size={42} color={colors.orange} />
+        </View>
+        <Text style={styles.learningComingSoonEyebrow}>Learning Subjects</Text>
+        <Text style={styles.learningComingSoonTitle}>Coming soon</Text>
+        <Text style={styles.learningComingSoonBody}>
+          We are preparing a safe, guided learning experience for every Mobsie learner.
+        </Text>
+        <View style={styles.learningComingSoonPill}>
+          <Ionicons name="time-outline" size={18} color={colors.green} />
+          <Text style={styles.learningComingSoonPillText}>Watch this space</Text>
         </View>
       </View>
-      <Button title={`Start ${selected.title}`} onPress={() => openLesson(selected)} />
     </Screen>
   );
 }
 
+function galleryCategory(value: Record<string, any>): 'Classroom' | 'Events' | 'Sports' {
+  const metadata =
+    typeof value.data === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(value.data);
+          } catch {
+            return {};
+          }
+        })()
+      : (value.data ?? value.metadata ?? {});
+  const raw = [
+    value.category,
+    value.type,
+    value.albumCategory,
+    value.album_category,
+    metadata.category,
+    metadata.type,
+    metadata.albumCategory,
+  ].find((item) => typeof item === 'string' && item.trim());
+  const category = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[ _-]+/g, ' ');
+
+  if (/(sport|pool|swim)/.test(category)) return 'Sports';
+  if (/(class|classroom|lesson|chess)/.test(category)) return 'Classroom';
+  // Dashboard records that predate categories are school event photos.
+  return 'Events';
+}
+
 export function GalleryScreen() {
   const { gallery, refresh } = useSchoolData();
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  const categories = ['All', 'Classroom', 'Events', 'Sports'];
   const fallbackPhotos = [
-    ['Pool Time', images.gallery.pool],
-    ['Our Team', images.gallery.team],
-    ['Performance Day', images.gallery.performance],
-    ['Chess Club', images.gallery.chess],
-    ['Class of 2024', images.gallery.class],
-    ['Fun Day', images.gallery.funDay],
+    ['Pool Time', 'Sports', images.gallery.pool],
+    ['Our Team', 'Events', images.gallery.team],
+    ['Performance Day', 'Events', images.gallery.performance],
+    ['Chess Club', 'Classroom', images.gallery.chess],
+    ['Class of 2024', 'Classroom', images.gallery.class],
+    ['Fun Day', 'Events', images.gallery.funDay],
   ] as const;
   const photos = gallery.length
     ? gallery.map((album: any, index: number) => ({
         title: album.name || album.title || `Gallery album ${index + 1}`,
-        image: album.imageUrl
-          ? { uri: album.imageUrl }
-          : fallbackPhotos[index % fallbackPhotos.length][1],
+        category: galleryCategory(album),
+        image:
+          album.imageUrl || album.image_url || album.coverUrl || album.cover_url || album.url
+            ? {
+                uri:
+                  album.imageUrl ||
+                  album.image_url ||
+                  album.coverUrl ||
+                  album.cover_url ||
+                  album.url,
+              }
+            : fallbackPhotos[index % fallbackPhotos.length][2],
       }))
-    : fallbackPhotos.map(([title, image]) => ({ title, image }));
+    : fallbackPhotos.map(([title, category, image]) => ({ title, category, image }));
+  const visiblePhotos = photos.filter(
+    (photo) => selectedCategory === 'All' || photo.category === selectedCategory,
+  );
   return (
     <Screen onRefresh={refresh}>
       <AppHeader title="Gallery" notification={false} />
       <View style={styles.galleryTabs}>
-        {['All', 'Classroom', 'Events', 'Sports'].map((item, index) => (
-          <Text key={item} style={[styles.galleryTab, index === 0 && styles.galleryActive]}>
-            {item}
-          </Text>
+        {categories.map((item) => (
+          <Pressable
+            key={item}
+            accessibilityRole="button"
+            accessibilityState={{ selected: selectedCategory === item }}
+            onPress={() => setSelectedCategory(item)}
+            style={[styles.galleryTab, selectedCategory === item && styles.galleryActive]}
+          >
+            <Text
+              style={[styles.galleryTabText, selectedCategory === item && styles.galleryActiveText]}
+            >
+              {item}
+            </Text>
+          </Pressable>
         ))}
       </View>
       <View style={styles.galleryGrid}>
-        {photos.map((photo) => (
+        {visiblePhotos.map((photo) => (
           <Card key={photo.title} style={styles.galleryCard}>
             <Image source={photo.image} style={styles.galleryImage} resizeMode="cover" />
             <Text style={styles.galleryTitle}>{photo.title}</Text>
           </Card>
         ))}
       </View>
+      {!visiblePhotos.length && (
+        <Card>
+          <Text style={styles.body}>No {selectedCategory.toLowerCase()} gallery items yet.</Text>
+        </Card>
+      )}
     </Screen>
   );
 }
@@ -918,7 +1051,7 @@ export function BranchesScreen() {
         );
       })}
     </Screen>
-  ); 
+  );
 }
 
 export function AboutScreen() {
@@ -1017,8 +1150,18 @@ export function ServicesScreen() {
             members of the community. We provide homework help and lunch meal for children who are
             in primary school.
           </Text>
-          <Text style={styles.pill}>Weekend Service: 06:00 – 17:00</Text>
-          <Text style={styles.holidayPill}>School Holidays: 07:00 – 17:30</Text>
+          <View
+            style={{
+              flexDirection: 'row',
+              gap: 8,
+              marginTop: 12,
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <Text style={styles.pill}>Weekend Service: 06:00 – 17:00</Text>
+            <Text style={styles.holidayPill}>School Holidays: 07:00 – 17:30</Text>
+          </View>
           <View style={styles.serviceFacilities}>
             {services.map(([icon, label, color]) => (
               <View key={label} style={styles.serviceFacility}>
@@ -1048,25 +1191,145 @@ export function ServicesScreen() {
               <Text style={styles.included}>{item}</Text>
             </View>
           ))}
-          <Text style={styles.feeNote}>Note: Specific fees details available upon inquiry.</Text>
+          <Text style={styles.includedHeading}>2027 Fee Reference</Text>
+          {['Mamelodi', 'Soshanguve', 'Hebron'].map((branch) => (
+            <View key={branch} style={{ marginTop: 12 }}>
+              <Text style={styles.cardTitle}>{branch}</Text>
+              {(publicFeeStructure(branch) || []).map((fee) => (
+                <View
+                  key={fee.stage}
+                  style={{
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    marginTop: 7,
+                  }}
+                >
+                  <Text style={styles.body}>{fee.label}</Text>
+                  <Text
+                    style={[styles.body, { fontFamily: 'Poppins_600SemiBold', textAlign: 'right' }]}
+                  >
+                    {formatZar(fee.monthlyFeeCents)} / month
+                  </Text>
+                </View>
+              ))}
+            </View>
+          ))}
+          <Text style={styles.feeNote}>
+            Annual and sibling rates are available during enrolment.
+          </Text>
         </View>
       </Card>
     </Screen>
   );
 }
 
-function ChildCard({ student, parentName }: { student?: any; parentName?: string }) {
+function ChildAccountSwitcher() {
+  const navigation = useNavigation<any>();
+  const { childProfiles, activeChild, selectChild } = useSchoolData();
+  const { startAdditionalChild } = useApplication();
+  const addChild = () => {
+    Alert.alert(
+      'Add another child',
+      'You will complete the same application and enrolment process for the new child. You can return and switch to an existing child at any time.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Start application',
+          onPress: () => {
+            void startAdditionalChild().then(() => navigation.navigate('ApplicationOne'));
+          },
+        },
+      ],
+    );
+  };
+  return (
+    <Card style={styles.childSwitcherCard}>
+      <View style={styles.childSwitcherHeader}>
+        <View style={styles.flex}>
+          <Text style={styles.cardTitle}>Your children</Text>
+          <Text style={styles.body}>Tap a child to switch their school profile.</Text>
+        </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Add another child"
+          onPress={addChild}
+          style={styles.addChildButton}
+        >
+          <Ionicons name="add" size={17} color="#fff" />
+          <Text style={styles.addChildButtonText}>Add child</Text>
+        </Pressable>
+      </View>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.childSwitcherList}
+      >
+        {childProfiles.map((child) => {
+          const selected = child.key === activeChild?.key;
+          return (
+            <Pressable
+              key={child.key}
+              accessibilityRole="button"
+              accessibilityLabel={`Switch to ${child.name}`}
+              onPress={() => void selectChild(child.key)}
+              style={[styles.childSwitchOption, selected && styles.childSwitchOptionActive]}
+            >
+              <Avatar name={child.name} size={34} />
+              <View>
+                <Text style={[styles.childSwitchName, selected && styles.childSwitchNameActive]}>
+                  {child.name}
+                </Text>
+                <Text
+                  style={[styles.childSwitchStatus, child.pending && styles.childSwitchPending]}
+                >
+                  {child.pending ? 'Awaiting approval' : 'Active'}
+                </Text>
+              </View>
+              {selected && <Ionicons name="checkmark-circle" size={18} color={colors.green} />}
+            </Pressable>
+          );
+        })}
+        {!childProfiles.length && (
+          <Text style={styles.profileReferencePending}>
+            No child profile yet. Select Add child to begin.
+          </Text>
+        )}
+      </ScrollView>
+    </Card>
+  );
+}
+
+function ChildCard({
+  student,
+  profile,
+  parentName,
+}: {
+  student?: any;
+  profile?: any;
+  parentName?: string;
+}) {
+  const pending = !student && profile?.pending;
   return (
     <Card style={styles.childCard}>
-      <Avatar name={student?.name ?? 'Child'} size={65} />
-      <View>
-        <Text style={styles.greetingSmall}>{student?.name ?? 'No enrolled child yet'}</Text>
+      <Avatar name={student?.name ?? profile?.name ?? 'Child'} size={65} />
+      <View style={styles.flex}>
+        <Text style={styles.greetingSmall}>
+          {student?.name ?? profile?.name ?? 'No enrolled child yet'}
+        </Text>
         <Text style={styles.body}>
           {student
-            ? `${student.grade} · ${student.branchName}`
-            : 'Complete enrolment to activate a profile'}
-          {`\n`}Parent: {parentName ?? ''}
+            ? `${sentenceCase(student.grade)} · ${student.branchName}`
+            : pending
+              ? `Application ${String(profile.status).replace(/_/g, ' ').toLowerCase()} · awaiting school approval`
+              : 'Complete enrolment to activate a profile'}
+          {`\n`}Parent: {personNameCase(parentName)}
         </Text>
+        {pending && (
+          <Text style={styles.pendingChildReference}>
+            {displayReference(profile.reference, 'Reference pending')}
+          </Text>
+        )}
       </View>
     </Card>
   );
@@ -1074,9 +1337,51 @@ function ChildCard({ student, parentName }: { student?: any; parentName?: string
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  greeting: { fontFamily: 'Poppins_700Bold', fontSize: 25, color: colors.ink, marginVertical: 14 },
+  greeting: { fontFamily: 'Poppins_700Bold', fontSize: 25, color: colors.ink, marginTop: 14 },
+  homeDate: {
+    color: colors.muted,
+    fontFamily: 'Poppins_500Medium',
+    fontSize: 11,
+    marginBottom: 14,
+  },
   greetingSmall: { fontFamily: 'Poppins_700Bold', fontSize: 18, color: colors.ink },
   childCard: { flexDirection: 'row', alignItems: 'center', gap: 15 },
+  childSwitcherCard: { marginBottom: 12, paddingVertical: 14 },
+  childSwitcherHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  childSwitcherList: { gap: 9, paddingTop: 12, paddingRight: 4 },
+  childSwitchOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    minWidth: 156,
+    borderWidth: 1,
+    borderColor: '#E5E7E4',
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    backgroundColor: '#fff',
+  },
+  childSwitchOptionActive: { borderColor: colors.green, backgroundColor: '#EFF8F1' },
+  childSwitchName: { fontFamily: 'Poppins_600SemiBold', color: colors.ink, fontSize: 11 },
+  childSwitchNameActive: { color: colors.green },
+  childSwitchStatus: { color: colors.green2, fontFamily: 'Poppins_500Medium', fontSize: 8 },
+  childSwitchPending: { color: colors.orange },
+  addChildButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    borderRadius: 18,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    backgroundColor: colors.orange,
+  },
+  addChildButtonText: { color: '#fff', fontFamily: 'Poppins_600SemiBold', fontSize: 9 },
+  pendingChildReference: {
+    color: colors.orange,
+    fontFamily: 'Poppins_600SemiBold',
+    fontSize: 9,
+    marginTop: 4,
+  },
   quickGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1133,8 +1438,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   calendarDateText: { fontFamily: 'Poppins_500Medium', fontSize: 11, color: colors.ink },
-  orangeDate: { backgroundColor: colors.orange, borderRadius: 10 },
   greenDate: { backgroundColor: colors.green, borderRadius: 22 },
+  selectedDate: {
+    backgroundColor: colors.orange,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: '#FFD8B8',
+  },
   white: { color: '#fff' },
   eventCard: { backgroundColor: colors.orange, marginTop: 16 },
   whiteTitle: { fontFamily: 'Poppins_700Bold', fontSize: 17, color: '#fff' },
@@ -1150,15 +1460,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   reminderRow: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 14 },
-  reminderSwitch: {
-    width: 43,
-    height: 23,
-    borderRadius: 12,
-    backgroundColor: '#706AF2',
-    padding: 3,
-    alignItems: 'flex-end',
-  },
-  reminderKnob: { width: 17, height: 17, borderRadius: 9, backgroundColor: '#fff' },
   reminderText: { fontFamily: 'Poppins_600SemiBold', fontSize: 11, color: '#fff' },
   upcomingIcon: {
     width: 31,
@@ -1169,6 +1470,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFF0DE',
   },
   upcomingIconPurple: { backgroundColor: '#F2E6FF' },
+  selectedEventRow: {
+    borderWidth: 2,
+    borderColor: colors.orange,
+    backgroundColor: '#FFF8F0',
+  },
   chatSafe: { flex: 1, backgroundColor: '#F7F2EA' },
   chatKeyboard: { flex: 1 },
   chatHeaderWrap: {
@@ -1270,11 +1576,43 @@ const styles = StyleSheet.create({
   },
   chatSendButtonDisabled: { backgroundColor: '#A9B5AF' },
   chatSendButtonPressed: { opacity: 0.78 },
+  referenceText: {
+    fontSize: 12,
+    color: colors.text,
+    fontFamily: 'Poppins_500Medium',
+    textAlign: 'center',
+    marginTop: 8,
+    maxWidth: '90%',
+  },
   profileHero: { alignItems: 'center', marginVertical: 25 },
-  profileBranchList: { alignItems: 'center', flexDirection: 'row', flexWrap: 'wrap', gap: 6, justifyContent: 'center', marginTop: 10 },
-  profileBranchChip: { alignItems: 'center', backgroundColor: colors.mint, borderRadius: radius.pill, flexDirection: 'row', gap: 5, paddingHorizontal: 11, paddingVertical: 6 },
-  profileBranchText: { color: colors.green, fontFamily: 'Poppins_600SemiBold', fontSize: 10 },
-  profileBranchEmpty: { color: colors.muted, fontSize: 10, marginTop: 8 },
+  profileReferenceCard: { gap: 12, marginBottom: 12 },
+  profileReferenceHeader: { alignItems: 'center', flexDirection: 'row', gap: 10 },
+  profileReferenceTitle: {
+    color: colors.ink,
+    fontFamily: 'Poppins_600SemiBold',
+    fontSize: 12,
+  },
+  profileReferenceRow: {
+    alignItems: 'center',
+    backgroundColor: colors.mint,
+    borderRadius: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 13,
+    paddingVertical: 11,
+  },
+  profileReferenceChild: { color: colors.text, flex: 1, fontSize: 10 },
+  profileReferenceValue: {
+    color: colors.green,
+    fontFamily: 'Poppins_700Bold',
+    fontSize: 11,
+    marginLeft: 12,
+  },
+  profileReferencePending: {
+    color: colors.muted,
+    fontSize: 10,
+    lineHeight: 15,
+  },
   profileRowIcon: {
     alignItems: 'center',
     backgroundColor: colors.mint,
@@ -1310,7 +1648,14 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     backgroundColor: '#F7F1EB',
   },
-  teacherPhoto: { width: 76, height: 86 },
+  teacherPhoto: {
+    width: 78,
+    height: 78,
+    borderRadius: 39,
+    borderWidth: 1,
+    borderColor: colors.blue,
+    overflow: 'hidden',
+  },
   experience: {
     backgroundColor: '#F8E7DB',
     fontSize: 8,
@@ -1321,6 +1666,64 @@ const styles = StyleSheet.create({
     marginTop: 5,
   },
   lessonGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  learningComingSoon: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E8E2D8',
+    borderRadius: 28,
+    borderWidth: 1,
+    marginHorizontal: 18,
+    marginTop: 60,
+    paddingHorizontal: 28,
+    paddingVertical: 42,
+    ...shadow,
+  },
+  learningComingSoonIcon: {
+    alignItems: 'center',
+    backgroundColor: '#FFF0E4',
+    borderRadius: 36,
+    height: 72,
+    justifyContent: 'center',
+    marginBottom: 20,
+    width: 72,
+  },
+  learningComingSoonTitle: {
+    color: colors.ink,
+    fontFamily: 'Poppins_700Bold',
+    fontSize: 22,
+    textAlign: 'center',
+  },
+  learningComingSoonEyebrow: {
+    color: colors.green,
+    fontFamily: 'Poppins_700Bold',
+    fontSize: 13,
+    letterSpacing: 0.4,
+    marginTop: 15,
+    textTransform: 'uppercase',
+  },
+  learningComingSoonBody: {
+    color: colors.muted,
+    fontFamily: 'Poppins_400Regular',
+    fontSize: 14,
+    lineHeight: 22,
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  learningComingSoonPill: {
+    alignItems: 'center',
+    backgroundColor: '#E9F8EE',
+    borderRadius: 20,
+    flexDirection: 'row',
+    gap: 7,
+    marginTop: 24,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  learningComingSoonPillText: {
+    color: colors.green,
+    fontFamily: 'Poppins_600SemiBold',
+    fontSize: 12,
+  },
   lesson: {
     width: '31%',
     height: 170,
@@ -1348,7 +1751,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     overflow: 'hidden',
   },
-  galleryActive: { backgroundColor: colors.green, color: '#fff' },
+  galleryTabText: { color: colors.ink, fontFamily: 'Poppins_600SemiBold', fontSize: 12 },
+  galleryActive: { backgroundColor: colors.green },
+  galleryActiveText: { color: '#fff' },
   galleryGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
   galleryCard: { width: '48%', padding: 0, overflow: 'hidden', marginBottom: 12 },
   galleryImage: { width: '100%', height: 125 },
@@ -1375,9 +1780,11 @@ const styles = StyleSheet.create({
   buttonRow: { flexDirection: 'row', gap: 8 },
   aboutScreen: { paddingHorizontal: 16, paddingTop: 4 },
   quoteBlock: {
+    alignSelf: 'stretch',
     borderLeftWidth: 4,
     borderLeftColor: '#2AA6A4',
     paddingLeft: 14,
+    paddingRight: 2,
     marginTop: 8,
     marginBottom: 18,
   },
@@ -1386,9 +1793,17 @@ const styles = StyleSheet.create({
     fontSize: 21,
     lineHeight: 28,
     color: '#111',
+    width: '100%',
   },
   quoteMark: { color: '#2AA6A4' },
-  aboutIntro: { fontSize: 11, lineHeight: 19, color: '#222', marginTop: 14 },
+  aboutIntro: {
+    alignSelf: 'stretch',
+    color: '#222',
+    fontSize: 11,
+    lineHeight: 19,
+    marginTop: 14,
+    width: '100%',
+  },
   story: {
     borderLeftWidth: 6,
     borderLeftColor: colors.green2,

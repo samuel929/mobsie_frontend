@@ -33,4 +33,7 @@ export type User = {
   phone?: string;
   tenantId?: string;
   child?: string;
+  applicationStatus?: string | null;
+  applicationReference?: string | null;
+  accessState?: 'NO_APPLICATION' | 'APPLICATION_IN_PROGRESS' | 'PENDING_APPROVAL' | 'APPROVED';
 };
