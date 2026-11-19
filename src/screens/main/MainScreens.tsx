@@ -130,7 +130,7 @@ export function HomeScreen() {
               colors.orange,
               () => navigation.navigate('DailyActivity'),
             ],
-            ['Progress', 'bar-chart', colors.amber, () => navigation.navigate('StudentReport')],
+            ['Attendance', 'bar-chart', colors.amber, () => navigation.navigate('StudentReport')],
             ['Messages', 'chatbubble-outline', colors.blue, () => navigation.navigate('Messages')],
           ] as const
         ).map(([title, icon, color, onPress]) => (

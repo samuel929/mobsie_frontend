@@ -164,8 +164,8 @@ export function DailyActivityScreen() {
             <Text style={styles.liveClassTitle}>{currentActivity.title}</Text>
             <Text style={styles.liveClassDetail}>
               {currentActivity.className && currentActivity.className !== 'ALL'
-                ? currentActivity.className
-                : student?.className || student?.grade || 'School timetable'}{' '}
+                ? sentenceCase(currentActivity.className)
+                : sentenceCase(student?.className || student?.grade || 'School timetable')}{' '}
               · {currentActivity.endTime}
             </Text>
           </View>
@@ -1177,9 +1177,17 @@ export function NotificationsScreen() {
 }
 
 export function StudentReportScreen() {
-  const { students, academics, attendance, refresh, loading } = useSchoolData();
+  const { students, activeChild, academics, attendance, refresh, loading } = useSchoolData();
   const [generatingPdf, setGeneratingPdf] = useState(false);
-  const student = students[0];
+  const [attendanceMonth, setAttendanceMonth] = useState(
+    () => new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+  );
+  const student = activeChild?.student ?? students[0];
+  useFocusEffect(
+    useCallback(() => {
+      refresh().catch(() => undefined);
+    }, [refresh]),
+  );
   const records = academics.filter((item) => item.studentId === student?.id);
   const scores = records.map((item) => Number(item.score)).filter(Number.isFinite);
   const average = scores.length
@@ -1192,10 +1200,34 @@ export function StudentReportScreen() {
   const attendanceRate = studentAttendance.length
     ? Math.round((attended / studentAttendance.length) * 100)
     : Math.round(Number(student?.attendanceRate) || 0);
-  const stats = [
-    { label: 'Attendance', value: `${attendanceRate}%`, color: colors.green2 },
-    { label: 'Overall Average', value: `${average}%`, color: colors.orange },
-  ];
+  const monthKey = `${attendanceMonth.getFullYear()}-${String(attendanceMonth.getMonth() + 1).padStart(2, '0')}`;
+  const monthlyAttendance = studentAttendance.filter((item) => item.date.startsWith(monthKey));
+  const attendanceByDate = new Map(
+    monthlyAttendance.map((item) => [item.date.slice(0, 10), String(item.status).toUpperCase()]),
+  );
+  const presentThisMonth = monthlyAttendance.filter((item) =>
+    ['PRESENT', 'LATE'].includes(String(item.status).toUpperCase()),
+  ).length;
+  const absentThisMonth = monthlyAttendance.filter(
+    (item) => String(item.status).toUpperCase() === 'ABSENT',
+  ).length;
+  const firstDayOffset = (attendanceMonth.getDay() + 6) % 7;
+  const daysInMonth = new Date(
+    attendanceMonth.getFullYear(),
+    attendanceMonth.getMonth() + 1,
+    0,
+  ).getDate();
+  const calendarCells = Array.from({ length: firstDayOffset + daysInMonth }, (_, index) => {
+    if (index < firstDayOffset) return null;
+    const day = index - firstDayOffset + 1;
+    const date = `${monthKey}-${String(day).padStart(2, '0')}`;
+    return { day, date, status: attendanceByDate.get(date) ?? null };
+  });
+  while (calendarCells.length % 7 !== 0) calendarCells.push(null);
+  const changeAttendanceMonth = (offset: number) =>
+    setAttendanceMonth(
+      (current) => new Date(current.getFullYear(), current.getMonth() + offset, 1),
+    );
   const escapeHtml = (value: unknown) =>
     String(value ?? '').replace(
       /[&<>"']/g,
@@ -1220,7 +1252,7 @@ export function StudentReportScreen() {
         .footer{color:#8A9592;font-size:11px;margin-top:36px;text-align:center}
       </style></head><body>
         <div class="brand"><h1>Mobsie Connect</h1><p>Student progress report · ${escapeHtml(new Date().toLocaleDateString('en-ZA', { day: 'numeric', month: 'long', year: 'numeric' }))}</p></div>
-        <div class="hero"><h2>${escapeHtml(student.name)}</h2><p>${escapeHtml(student.grade)} · ${escapeHtml(student.className)} · ${escapeHtml(student.branchName)}</p></div>
+        <div class="hero"><h2>${escapeHtml(student.name)}</h2><p>${escapeHtml(sentenceCase(student.grade))} · ${escapeHtml(sentenceCase(student.className))} · ${escapeHtml(student.branchName)}</p></div>
         <div class="stats"><div class="stat"><b>${attendanceRate}%</b>Attendance<br><small>${studentAttendance.length} register entries</small></div><div class="stat"><b>${average}%</b>Overall academic average<br><small>${scores.length} assessed subjects</small></div></div>
         <div class="footer">Generated securely by Mobsie Connect</div>
       </body></html>`;
@@ -1245,27 +1277,108 @@ export function StudentReportScreen() {
   };
   return (
     <Screen onRefresh={refresh}>
-      <FeatureHeader title={`${student?.name ?? 'Student'}’s Report`} />
+      <FeatureHeader title={`${student?.name ?? 'Student'}’s Attendance`} />
       {loading && <ActivityIndicator color={colors.green} />}
       <Card style={styles.listCard}>
         <Avatar name={student?.name ?? 'Student'} />
         <View style={styles.flex}>
           <Text style={styles.headingSmall}>{student?.name ?? 'No enrolled student'}</Text>
           <Text style={styles.subtle}>
-            {student ? `${student.grade} · ${student.className}` : 'Complete enrolment first'}
+            {student
+              ? `${sentenceCase(student.grade)} · ${sentenceCase(student.className)}`
+              : 'Complete enrolment first'}
           </Text>
         </View>
         <Ionicons name="shield-checkmark" size={26} color={colors.purple} />
       </Card>
-      <SectionTitle title="Key Stats" />
-      <View style={styles.twoColumns}>
-        {stats.map((stat) => (
-          <Card key={stat.label} style={styles.halfCard}>
-            <Text style={[styles.metric, { color: stat.color }]}>{stat.value}</Text>
-            <Text style={styles.subtle}>{stat.label}</Text>
-          </Card>
-        ))}
-      </View>
+      <SectionTitle title="Attendance & Progress" />
+      <Card style={styles.attendanceCalendarCard}>
+        <View style={styles.attendanceMonthHeader}>
+          <Pressable
+            accessibilityLabel="Previous month"
+            hitSlop={10}
+            onPress={() => changeAttendanceMonth(-1)}
+            style={styles.attendanceMonthButton}
+          >
+            <Ionicons name="chevron-back" size={20} color={colors.green} />
+          </Pressable>
+          <Text style={styles.attendanceMonthTitle}>
+            {attendanceMonth.toLocaleDateString('en-ZA', { month: 'long', year: 'numeric' })}
+          </Text>
+          <Pressable
+            accessibilityLabel="Next month"
+            hitSlop={10}
+            onPress={() => changeAttendanceMonth(1)}
+            style={styles.attendanceMonthButton}
+          >
+            <Ionicons name="chevron-forward" size={20} color={colors.green} />
+          </Pressable>
+        </View>
+        <View style={styles.attendanceWeekRow}>
+          {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day) => (
+            <Text key={day} style={styles.attendanceWeekday}>{day}</Text>
+          ))}
+        </View>
+        <View style={styles.attendanceGrid}>
+          {calendarCells.map((cell, index) => {
+            const present = cell?.status === 'PRESENT' || cell?.status === 'LATE';
+            const absent = cell?.status === 'ABSENT';
+            return (
+              <View
+                key={cell?.date ?? `empty-${index}`}
+                style={[
+                  styles.attendanceDay,
+                  present && styles.attendanceDayPresent,
+                  absent && styles.attendanceDayAbsent,
+                  !cell && styles.attendanceDayEmpty,
+                ]}
+              >
+                {cell && (
+                  <>
+                    <Text style={[styles.attendanceDayNumber, (present || absent) && styles.attendanceDayMarkedText]}>
+                      {cell.day}
+                    </Text>
+                    <Text style={[styles.attendanceDayStatus, (present || absent) && styles.attendanceDayMarkedText]}>
+                      {present ? 'P' : absent ? 'A' : ''}
+                    </Text>
+                  </>
+                )}
+              </View>
+            );
+          })}
+        </View>
+        <View style={styles.attendanceLegend}>
+          <View style={styles.attendanceLegendItem}>
+            <View style={[styles.attendanceLegendDot, styles.attendanceDayPresent]} />
+            <Text style={styles.subtle}>Present</Text>
+          </View>
+          <View style={styles.attendanceLegendItem}>
+            <View style={[styles.attendanceLegendDot, styles.attendanceDayAbsent]} />
+            <Text style={styles.subtle}>Absent</Text>
+          </View>
+        </View>
+        <View style={styles.attendanceTotals}>
+          <View style={styles.attendanceTotalItem}>
+            <Text style={[styles.attendanceTotalValue, { color: colors.green2 }]}>{presentThisMonth}</Text>
+            <Text style={styles.subtle}>Present</Text>
+          </View>
+          <View style={styles.attendanceTotalItem}>
+            <Text style={[styles.attendanceTotalValue, { color: '#D74747' }]}>{absentThisMonth}</Text>
+            <Text style={styles.subtle}>Absent</Text>
+          </View>
+          <View style={styles.attendanceTotalItem}>
+            <Text style={[styles.attendanceTotalValue, { color: colors.orange }]}>{attendanceRate}%</Text>
+            <Text style={styles.subtle}>Overall</Text>
+          </View>
+          <View style={styles.attendanceTotalItem}>
+            <Text style={[styles.attendanceTotalValue, { color: colors.purple }]}>{average}%</Text>
+            <Text style={styles.subtle}>Progress</Text>
+          </View>
+        </View>
+        {!monthlyAttendance.length && (
+          <Text style={styles.attendanceEmpty}>No attendance has been captured for this month.</Text>
+        )}
+      </Card>
       <Button
         title={generatingPdf ? 'Generating PDF…' : 'Download PDF Report'}
         icon="download-outline"
@@ -2220,6 +2333,62 @@ const styles = StyleSheet.create({
   },
   twoColumns: { flexDirection: 'row', gap: 10 },
   halfCard: { flex: 1, gap: 8, minHeight: 100 },
+  attendanceCalendarCard: { gap: 12, padding: 14 },
+  attendanceMonthHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  attendanceMonthButton: {
+    alignItems: 'center',
+    backgroundColor: '#EAF5F1',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36,
+  },
+  attendanceMonthTitle: {
+    color: colors.ink,
+    fontFamily: 'Poppins_700Bold',
+    fontSize: 15,
+  },
+  attendanceWeekRow: { flexDirection: 'row', gap: 4 },
+  attendanceWeekday: {
+    color: colors.muted,
+    flex: 1,
+    fontFamily: 'Poppins_600SemiBold',
+    fontSize: 8,
+    textAlign: 'center',
+  },
+  attendanceGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  attendanceDay: {
+    alignItems: 'center',
+    backgroundColor: '#F4F6F5',
+    borderColor: '#E4E9E7',
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 46,
+    justifyContent: 'center',
+    width: '13.35%',
+  },
+  attendanceDayPresent: { backgroundColor: '#28B86A', borderColor: '#28B86A' },
+  attendanceDayAbsent: { backgroundColor: '#E95858', borderColor: '#E95858' },
+  attendanceDayEmpty: { backgroundColor: 'transparent', borderColor: 'transparent' },
+  attendanceDayNumber: { color: colors.muted, fontSize: 8, fontWeight: '700' },
+  attendanceDayStatus: { color: colors.ink, fontSize: 13, fontWeight: '900', lineHeight: 17 },
+  attendanceDayMarkedText: { color: '#fff' },
+  attendanceLegend: { flexDirection: 'row', gap: 16, justifyContent: 'center' },
+  attendanceLegendItem: { alignItems: 'center', flexDirection: 'row', gap: 6 },
+  attendanceLegendDot: { borderRadius: 3, height: 10, width: 10 },
+  attendanceTotals: {
+    borderTopColor: colors.line,
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    paddingTop: 12,
+  },
+  attendanceTotalItem: { alignItems: 'center', flex: 1, gap: 2 },
+  attendanceTotalValue: { fontFamily: 'Poppins_700Bold', fontSize: 19 },
+  attendanceEmpty: { color: colors.muted, fontSize: 10, textAlign: 'center' },
   event: { color: colors.text, fontSize: 11, lineHeight: 24 },
   notificationsScreen: { paddingHorizontal: 14 },
   notificationsHeader: {
