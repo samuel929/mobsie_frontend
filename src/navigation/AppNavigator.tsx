@@ -36,6 +36,7 @@ import {
   AboutScreen,
   BranchesScreen,
   CalendarScreen,
+  InvoicesScreen,
   GalleryScreen,
   HomeScreen,
   LearningScreen,
@@ -71,7 +72,7 @@ function FixedBottomNavigation({ navigation }: { navigation: any }) {
   ).length;
   const items = [
     ['Home', 'home-outline'],
-    ['Calendar', 'calendar-outline'],
+    ['Invoices', 'receipt-outline'],
     ['Messages', 'chatbubble-outline'],
     ['Profile', 'person-outline'],
   ] as const;
@@ -132,10 +133,11 @@ const NotificationsWithBottomNav = withFixedBottomNavigation(NotificationsScreen
 const NewsletterWithBottomNav = withFixedBottomNavigation(NewsletterScreen);
 const FeedbackWithBottomNav = withFixedBottomNavigation(FeedbackScreen);
 const AboutWithBottomNav = withFixedBottomNavigation(AboutScreen);
+const CalendarWithBottomNav = withFixedBottomNavigation(CalendarScreen);
 
 const tabIcons: Record<string, keyof typeof Ionicons.glyphMap> = {
   Home: 'home-outline',
-  Calendar: 'calendar-outline',
+  Invoices: 'receipt-outline',
   Messages: 'chatbubble-outline',
   Profile: 'person-outline',
 };
@@ -166,7 +168,7 @@ function BottomTabs() {
       })}
     >
       <Tabs.Screen name="Home" component={HomeScreen} />
-      <Tabs.Screen name="Calendar" component={CalendarScreen} />
+      <Tabs.Screen name="Invoices" component={InvoicesScreen} />
       <Tabs.Screen name="Messages" component={MessagesScreen} />
       <Tabs.Screen name="Profile" component={ProfileScreen} />
     </Tabs.Navigator>
@@ -235,6 +237,11 @@ function MainDrawer() {
             <Ionicons style={{ marginRight: 20 }} name="book-outline" size={19} color={color} />
           ),
         }}
+      />
+      <Drawer.Screen
+        name="Calendar"
+        component={CalendarWithBottomNav}
+        options={{ drawerItemStyle: { display: 'none' } }}
       />
       <Drawer.Screen
         name="DailyActivity"

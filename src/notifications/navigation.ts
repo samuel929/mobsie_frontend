@@ -1,6 +1,6 @@
 type Navigation = { navigate: (screen: string, params?: Record<string, unknown>) => void };
 
-const tabScreens = new Set(['Home', 'Calendar', 'Messages', 'Profile']);
+const tabScreens = new Set(['Home', 'Invoices', 'Messages', 'Profile']);
 const drawerScreens = new Set([
   'Learning',
   'DailyActivity',
@@ -17,6 +17,7 @@ const drawerScreens = new Set([
   'Newsletter',
   'Feedback',
   'About',
+  'Calendar',
 ]);
 
 export function openNotificationDestination(

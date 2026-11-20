@@ -9,6 +9,7 @@ import {
   Image,
   KeyboardAvoidingView,
   Linking,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -35,6 +36,7 @@ import {
 } from '../../notifications/calendarReminders';
 import { displayReference } from '../../utils/reference';
 import { personNameCase, sentenceCase } from '../../utils/text';
+import { apiData } from '../../services/api/client';
 
 function parseApiDate(value: unknown): Date | null {
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
@@ -438,6 +440,151 @@ export function CalendarScreen({ route }: { route?: { params?: { eventId?: strin
           <Text style={styles.body}>No events have been added.</Text>
         </Card>
       )}
+    </Screen>
+  );
+}
+
+type ParentInvoice = {
+  id: string;
+  invoiceNumber: string;
+  description: string;
+  amountCents: number;
+  issuedOn: string;
+  dueOn: string;
+  status: 'DUE' | 'OVERDUE' | 'PAID';
+  paidAt?: string | null;
+  branchName?: string | null;
+};
+
+const invoiceMoney = (cents: number) =>
+  `R ${(Number(cents || 0) / 100).toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const invoiceDate = (value?: string | null) => {
+  if (!value) return '—';
+  const parsed = parseApiDate(value);
+  return parsed ? parsed.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' }) : value;
+};
+
+export function InvoicesScreen() {
+  const { token } = useAuth();
+  const [invoices, setInvoices] = useState<ParentInvoice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [payingId, setPayingId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<ParentInvoice | null>(null);
+  const [filter, setFilter] = useState<'ALL' | 'PENDING' | 'PAID' | 'OVERDUE'>('ALL');
+  const [query, setQuery] = useState('');
+
+  const loadInvoices = React.useCallback(async () => {
+    if (!token) return;
+    try {
+      setInvoices(await apiData<ParentInvoice[]>('/mobile/invoices', { token, forceRefresh: true, cacheTtlMs: 0 }));
+    } catch (error) {
+      Alert.alert('Unable to load invoices', error instanceof Error ? error.message : 'Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useFocusEffect(React.useCallback(() => { void loadInvoices(); }, [loadInvoices]));
+  useEffect(() => {
+    const subscription = Linking.addEventListener('url', ({ url }) => {
+      if (url.includes('invoices/payment/')) void loadInvoices();
+    });
+    return () => subscription.remove();
+  }, [loadInvoices]);
+
+  const outstanding = invoices
+    .filter((invoice) => invoice.status !== 'PAID')
+    .reduce((total, invoice) => total + Number(invoice.amountCents || 0), 0);
+  const visible = invoices.filter((invoice) => {
+    if (filter === 'PAID' && invoice.status !== 'PAID') return false;
+    if (filter === 'OVERDUE' && invoice.status !== 'OVERDUE') return false;
+    if (filter === 'PENDING' && !['DUE', 'OVERDUE'].includes(invoice.status)) return false;
+    const term = query.trim().toLowerCase();
+    return !term || `${invoice.invoiceNumber} ${invoice.description}`.toLowerCase().includes(term);
+  });
+
+  const payInvoice = async (invoice: ParentInvoice) => {
+    if (!token || payingId) return;
+    setPayingId(invoice.id);
+    try {
+      const result = await apiData<{ checkoutUrl: string }>(`/mobile/invoices/${invoice.id}/payfast`, {
+        method: 'POST', token,
+        body: JSON.stringify({ returnUrl: 'mobsieconnect://invoices/payment/return' }),
+      });
+      await Linking.openURL(result.checkoutUrl);
+    } catch (error) {
+      Alert.alert('Payment could not start', error instanceof Error ? error.message : 'Please try again.');
+    } finally {
+      setPayingId(null);
+    }
+  };
+
+  return (
+    <Screen onRefresh={loadInvoices}>
+      <AppHeader title="Invoices" />
+      <Text style={styles.invoiceSubheading}>{invoices.length} invoice{invoices.length === 1 ? '' : 's'}</Text>
+      <Card style={styles.invoiceBalanceCard}>
+        <Text style={styles.invoiceBalanceLabel}>Total amount owing</Text>
+        <Text style={styles.invoiceBalanceValue}>{invoiceMoney(outstanding)}</Text>
+        <Text style={styles.invoiceBalanceHint}>Across all pending and overdue invoices</Text>
+      </Card>
+      <View style={styles.invoiceSearch}>
+        <Ionicons name="search-outline" size={18} color="#7A8581" />
+        <TextInput value={query} onChangeText={setQuery} placeholder="Search invoices…" style={styles.invoiceSearchInput} />
+      </View>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.invoiceFilterScroll}
+        contentContainerStyle={styles.invoiceFilters}
+      >
+        {(['ALL', 'PENDING', 'PAID', 'OVERDUE'] as const).map((value) => (
+          <Pressable key={value} onPress={() => setFilter(value)} style={[styles.invoiceFilter, filter === value && styles.invoiceFilterActive]}>
+            <Text style={[styles.invoiceFilterText, filter === value && styles.invoiceFilterTextActive]}>{sentenceCase(value)}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+      {loading && <ActivityIndicator color={colors.green} />}
+      {!loading && !visible.length && <Card><Text style={styles.body}>No invoices match this filter.</Text></Card>}
+      {visible.map((invoice) => (
+        <Pressable key={invoice.id} onPress={() => setSelected(invoice)}>
+          <Card style={styles.invoiceCard}>
+            <View style={styles.invoiceIcon}><Ionicons name="receipt-outline" size={22} color={colors.green} /></View>
+            <View style={styles.flex}>
+              <View style={styles.invoiceCardTop}>
+                <Text style={styles.invoiceDescription}>{invoice.description}</Text>
+                <Text style={styles.invoiceAmount}>{invoiceMoney(invoice.amountCents)}</Text>
+              </View>
+              <Text style={styles.invoiceNumber}>{invoice.invoiceNumber}</Text>
+              <View style={styles.invoiceMeta}>
+                <Text style={[styles.invoiceStatus, invoice.status === 'PAID' ? styles.invoicePaid : invoice.status === 'OVERDUE' ? styles.invoiceOverdue : styles.invoiceDue]}>{sentenceCase(invoice.status)}</Text>
+                <Text style={styles.invoiceDate}>Due {invoiceDate(invoice.dueOn)}</Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color="#98A09D" />
+          </Card>
+        </Pressable>
+      ))}
+      <Modal visible={Boolean(selected)} transparent animationType="slide" onRequestClose={() => setSelected(null)}>
+        <View style={styles.invoiceModalBackdrop}>
+          <View style={styles.invoiceModal}>
+            <View style={styles.invoiceModalHeader}>
+              <Text style={styles.invoiceModalTitle}>Invoice details</Text>
+              <Pressable onPress={() => setSelected(null)}><Ionicons name="close" size={25} color={colors.ink} /></Pressable>
+            </View>
+            {selected && <>
+              <Text style={styles.invoiceDetailAmount}>{invoiceMoney(selected.amountCents)}</Text>
+              <Text style={styles.invoiceDetailSubject}>{selected.description}</Text>
+              {[['Invoice number', selected.invoiceNumber], ['Campus', selected.branchName || 'Not assigned'], ['Issued', invoiceDate(selected.issuedOn)], ['Due date', invoiceDate(selected.dueOn)], ['Status', sentenceCase(selected.status)], ...(selected.paidAt ? [['Paid on', invoiceDate(selected.paidAt)]] : [])].map(([label, value]) => (
+                <View key={label} style={styles.invoiceDetailRow}><Text style={styles.invoiceDetailLabel}>{label}</Text><Text style={styles.invoiceDetailValue}>{value}</Text></View>
+              ))}
+              {selected.status !== 'PAID' && <Button title={payingId === selected.id ? 'Opening PayFast…' : `Pay ${invoiceMoney(selected.amountCents)}`} icon="card-outline" disabled={Boolean(payingId)} onPress={() => void payInvoice(selected)} style={{ marginTop: 18 }} />}
+              {selected.status === 'PAID' && <View style={styles.invoicePaidConfirmation}><Ionicons name="checkmark-circle" size={22} color={colors.green2} /><Text style={styles.invoicePaidConfirmationText}>Payment confirmed</Text></View>}
+            </>}
+          </View>
+        </View>
+      </Modal>
     </Screen>
   );
 }
@@ -1470,6 +1617,42 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFF0DE',
   },
   upcomingIconPurple: { backgroundColor: '#F2E6FF' },
+  invoiceSubheading: { fontFamily: 'Poppins_500Medium', fontSize: 11, color: '#7A8581', textAlign: 'center', marginTop: -8, marginBottom: 12 },
+  invoiceBalanceCard: { backgroundColor: colors.green, marginBottom: 13 },
+  invoiceBalanceLabel: { color: '#DDF2E3', fontFamily: 'Poppins_500Medium', fontSize: 11 },
+  invoiceBalanceValue: { color: '#fff', fontFamily: 'Poppins_700Bold', fontSize: 27, marginTop: 2 },
+  invoiceBalanceHint: { color: '#DDF2E3', fontFamily: 'Poppins_500Medium', fontSize: 9, marginTop: 2 },
+  invoiceSearch: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#fff', borderRadius: 16, paddingHorizontal: 14, minHeight: 48, marginBottom: 11 },
+  invoiceSearchInput: { flex: 1, fontFamily: 'Poppins_500Medium', fontSize: 11, color: colors.ink },
+  invoiceFilterScroll: { flexGrow: 0, flexShrink: 0, height: 45, marginBottom: 8 },
+  invoiceFilters: { gap: 8, paddingBottom: 5, alignItems: 'flex-start' },
+  invoiceFilter: { height: 36, justifyContent: 'center', paddingHorizontal: 15, borderRadius: 20, backgroundColor: '#ECECEA' },
+  invoiceFilterActive: { backgroundColor: colors.green },
+  invoiceFilterText: { fontFamily: 'Poppins_500Medium', fontSize: 10, color: '#646B68' },
+  invoiceFilterTextActive: { color: '#fff', fontFamily: 'Poppins_600SemiBold' },
+  invoiceCard: { flexDirection: 'row', alignItems: 'center', gap: 11, marginBottom: 10, padding: 13 },
+  invoiceIcon: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#EFF8F1', alignItems: 'center', justifyContent: 'center' },
+  invoiceCardTop: { flexDirection: 'row', justifyContent: 'space-between', gap: 8 },
+  invoiceDescription: { flex: 1, fontFamily: 'Poppins_600SemiBold', fontSize: 11, color: colors.ink },
+  invoiceAmount: { fontFamily: 'Poppins_700Bold', fontSize: 11, color: colors.ink },
+  invoiceNumber: { fontFamily: 'Poppins_500Medium', fontSize: 9, color: '#7A8581', marginTop: 2 },
+  invoiceMeta: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 7 },
+  invoiceStatus: { overflow: 'hidden', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3, fontFamily: 'Poppins_600SemiBold', fontSize: 8 },
+  invoicePaid: { color: '#238346', backgroundColor: '#DFF5E6' },
+  invoiceDue: { color: '#9A6A00', backgroundColor: '#FFF2C9' },
+  invoiceOverdue: { color: '#B52D28', backgroundColor: '#FFE2E0' },
+  invoiceDate: { fontFamily: 'Poppins_500Medium', fontSize: 8, color: '#7A8581' },
+  invoiceModalBackdrop: { flex: 1, backgroundColor: 'rgba(20,30,28,.45)', justifyContent: 'flex-end' },
+  invoiceModal: { backgroundColor: colors.paper, borderTopLeftRadius: 25, borderTopRightRadius: 25, padding: 22, paddingBottom: 36 },
+  invoiceModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  invoiceModalTitle: { fontFamily: 'Poppins_700Bold', fontSize: 18, color: colors.ink },
+  invoiceDetailAmount: { fontFamily: 'Poppins_700Bold', fontSize: 29, color: colors.green, marginTop: 18 },
+  invoiceDetailSubject: { fontFamily: 'Poppins_600SemiBold', fontSize: 13, color: colors.ink, marginBottom: 16 },
+  invoiceDetailRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 18, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.line },
+  invoiceDetailLabel: { fontFamily: 'Poppins_500Medium', fontSize: 10, color: '#7A8581' },
+  invoiceDetailValue: { flex: 1, textAlign: 'right', fontFamily: 'Poppins_600SemiBold', fontSize: 10, color: colors.ink },
+  invoicePaidConfirmation: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, backgroundColor: '#EFF8F1', borderRadius: 14, padding: 14, marginTop: 18 },
+  invoicePaidConfirmationText: { fontFamily: 'Poppins_600SemiBold', color: colors.green, fontSize: 12 },
   selectedEventRow: {
     borderWidth: 2,
     borderColor: colors.orange,

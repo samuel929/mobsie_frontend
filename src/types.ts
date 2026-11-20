@@ -14,6 +14,7 @@ export type RootStackParamList = {
   Branches: undefined;
   Gallery: undefined;
   Calendar: undefined;
+  Invoices: undefined;
   Learning: undefined;
   DailyActivity: undefined;
   Forms: undefined;
